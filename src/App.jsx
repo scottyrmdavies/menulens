@@ -377,7 +377,7 @@ function App() {
                   >
                     Cancel
                   </button>
-                  <button className="flex-1 bg-orange-600 text-white py-3 rounded-xl font-semibold hover:bg-orange-700 transition-colors">
+                  <button className="flex-1 bg-orange-700 text-white py-3 rounded-xl font-semibold hover:bg-orange-800 transition-colors">
                     Enable Travel Mode
                   </button>
                 </div>
