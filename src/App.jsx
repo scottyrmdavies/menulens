@@ -269,7 +269,7 @@ function App() {
                         className={`p-3 rounded-lg border-2 text-left transition-colors ${
                           userPreferences.dietaryRestrictions.includes(option.id)
                             ? 'border-blue-500 bg-blue-50 text-blue-900'
-                            : 'border-gray-200 bg-white text-gray-900 hover:border-gray-300'
+                            : 'border-gray-300 bg-gray-100 text-gray-900 hover:border-gray-400 hover:bg-gray-200'
                         }`}
                       >
                         <div className="flex items-center gap-2">
@@ -292,7 +292,7 @@ function App() {
                         className={`p-3 rounded-lg border-2 text-left transition-colors ${
                           userPreferences.allergens.includes(allergen)
                             ? 'border-red-500 bg-red-50 text-red-900'
-                            : 'border-gray-200 bg-white text-gray-900 hover:border-gray-300'
+                            : 'border-gray-300 bg-gray-100 text-gray-900 hover:border-gray-400 hover:bg-gray-200'
                         }`}
                       >
                         <span className="text-sm font-medium">{allergen}</span>
