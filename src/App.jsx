@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Leaf, Dumbbell, Globe, Camera, CheckCircle, X, MapPin, Clock, Users } from 'lucide-react';
+import { Shield, Leaf, Dumbbell, Globe, Camera, CheckCircle, X, MapPin, Clock, Users, Settings, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 function App() {
@@ -8,25 +8,47 @@ function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [results, setResults] = useState(null);
   const [showTravelModal, setShowTravelModal] = useState(false);
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [userPreferences, setUserPreferences] = useState({
+    dietaryRestrictions: [],
+    allergens: [],
+    cuisinePreferences: []
+  });
+
+  const dietaryOptions = [
+    { id: 'vegetarian', label: 'Vegetarian', icon: '🥬' },
+    { id: 'vegan', label: 'Vegan', icon: '🌱' },
+    { id: 'gluten-free', label: 'Gluten-Free', icon: '🌾' },
+    { id: 'dairy-free', label: 'Dairy-Free', icon: '🥛' },
+    { id: 'nut-free', label: 'Nut-Free', icon: '🥜' },
+    { id: 'low-carb', label: 'Low-Carb', icon: '🥩' },
+    { id: 'keto', label: 'Keto', icon: '🥑' },
+    { id: 'halal', label: 'Halal', icon: '☪️' },
+    { id: 'kosher', label: 'Kosher', icon: '✡️' }
+  ];
+
+  const allergenOptions = [
+    'Peanuts', 'Tree Nuts', 'Milk', 'Eggs', 'Fish', 'Shellfish', 'Wheat', 'Soy', 'Sesame'
+  ];
 
   const onboardingSteps = [
     {
       icon: Shield,
       title: "Welcome to MenuLens",
       description: "Your personal dietary assistant for safer dining out",
-      color: "text-blue-600"
+      color: "text-blue-800"
     },
     {
       icon: Leaf,
       title: "Scan Any Menu",
       description: "Use your camera to scan restaurant menus instantly",
-      color: "text-green-600"
+      color: "text-green-800"
     },
     {
       icon: Dumbbell,
       title: "Get Instant Results",
       description: "Receive detailed analysis of allergens and dietary restrictions",
-      color: "text-purple-600"
+      color: "text-purple-800"
     }
   ];
 
@@ -63,20 +85,65 @@ function App() {
     setShowTravelModal(true);
   };
 
+  const handleSettings = () => {
+    setShowSettingsModal(true);
+  };
+
+  const toggleDietaryRestriction = (restriction) => {
+    setUserPreferences(prev => ({
+      ...prev,
+      dietaryRestrictions: prev.dietaryRestrictions.includes(restriction)
+        ? prev.dietaryRestrictions.filter(r => r !== restriction)
+        : [...prev.dietaryRestrictions, restriction]
+    }));
+  };
+
+  const toggleAllergen = (allergen) => {
+    setUserPreferences(prev => ({
+      ...prev,
+      allergens: prev.allergens.includes(allergen)
+        ? prev.allergens.filter(a => a !== allergen)
+        : [...prev.allergens, allergen]
+    }));
+  };
+
+  const saveSettings = () => {
+    setShowSettingsModal(false);
+    // Here you could save to localStorage or send to backend
+    localStorage.setItem('menulens-preferences', JSON.stringify(userPreferences));
+  };
+
+  // Load saved preferences on mount
+  useEffect(() => {
+    const saved = localStorage.getItem('menulens-preferences');
+    if (saved) {
+      setUserPreferences(JSON.parse(saved));
+    }
+  }, []);
+
   if (showCamera) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+      <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-4">
         <div className="max-w-md mx-auto">
           {/* Header */}
           <div className="flex items-center justify-between mb-6">
-            <h1 className="text-2xl font-bold text-gray-800">MenuLens</h1>
-            <button
-              onClick={handleTravelMode}
-              className="flex items-center gap-2 bg-orange-500 text-white px-4 py-2 rounded-lg hover:bg-orange-600 transition-colors"
-            >
-              <Globe className="w-4 h-4" />
-              Travel
-            </button>
+            <h1 className="text-2xl font-bold text-gray-900">MenuLens</h1>
+            <div className="flex gap-2">
+              <button
+                onClick={handleSettings}
+                className="flex items-center gap-2 bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
+              >
+                <Settings className="w-4 h-4" />
+                Settings
+              </button>
+              <button
+                onClick={handleTravelMode}
+                className="flex items-center gap-2 bg-orange-600 text-white px-4 py-2 rounded-lg hover:bg-orange-700 transition-colors"
+              >
+                <Globe className="w-4 h-4" />
+                Travel
+              </button>
+            </div>
           </div>
 
           {/* Camera Interface */}
@@ -103,7 +170,7 @@ function App() {
             {!results && !analyzing && (
               <button
                 onClick={handleScan}
-                className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors"
+                className="w-full bg-blue-700 text-white py-3 rounded-xl font-semibold hover:bg-blue-800 transition-colors shadow-lg"
               >
                 Scan Menu
               </button>
@@ -163,6 +230,96 @@ function App() {
             </motion.div>
           )}
         </div>
+
+        {/* Settings Modal */}
+        <AnimatePresence>
+          {showSettingsModal && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
+              onClick={() => setShowSettingsModal(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                exit={{ scale: 0.9, opacity: 0 }}
+                className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-xl font-bold text-gray-900">Dietary Preferences</h3>
+                  <button
+                    onClick={() => setShowSettingsModal(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <X className="w-6 h-6" />
+                  </button>
+                </div>
+
+                {/* Dietary Restrictions */}
+                <div className="mb-6">
+                  <h4 className="font-semibold text-gray-800 mb-3">Dietary Restrictions</h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    {dietaryOptions.map((option) => (
+                      <button
+                        key={option.id}
+                        onClick={() => toggleDietaryRestriction(option.id)}
+                        className={`p-3 rounded-lg border-2 text-left transition-colors ${
+                          userPreferences.dietaryRestrictions.includes(option.id)
+                            ? 'border-blue-500 bg-blue-50 text-blue-700'
+                            : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="text-lg">{option.icon}</span>
+                          <span className="text-sm font-medium">{option.label}</span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Allergens */}
+                <div className="mb-6">
+                  <h4 className="font-semibold text-gray-800 mb-3">Allergen Alerts</h4>
+                  <div className="grid grid-cols-2 gap-3">
+                    {allergenOptions.map((allergen) => (
+                      <button
+                        key={allergen}
+                        onClick={() => toggleAllergen(allergen)}
+                        className={`p-3 rounded-lg border-2 text-left transition-colors ${
+                          userPreferences.allergens.includes(allergen)
+                            ? 'border-red-500 bg-red-50 text-red-700'
+                            : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+                        }`}
+                      >
+                        <span className="text-sm font-medium">{allergen}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowSettingsModal(false)}
+                    className="flex-1 bg-gray-200 text-gray-800 py-3 rounded-xl font-semibold hover:bg-gray-300 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={saveSettings}
+                    className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                  >
+                    <Save className="w-4 h-4" />
+                    Save Settings
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Travel Modal */}
         <AnimatePresence>
@@ -233,7 +390,7 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-6">
+    <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 flex items-center justify-center p-6">
       <div className="max-w-sm w-full">
         <AnimatePresence mode="wait">
           <motion.div
@@ -269,7 +426,7 @@ function App() {
 
             <button
               onClick={handleNext}
-              className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors"
+              className="w-full bg-blue-700 text-white py-3 rounded-xl font-semibold hover:bg-blue-800 transition-colors shadow-lg"
             >
               {currentStep === onboardingSteps.length - 1 ? 'Get Started' : 'Next'}
             </button>
