@@ -152,7 +152,7 @@ function App() {
               {analyzing ? (
                 <div className="text-center">
                   <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-                  <p className="text-gray-600">Analyzing menu...</p>
+                  <p className="text-gray-800">Analyzing menu...</p>
                 </div>
               ) : results ? (
                 <div className="text-center text-green-600">
@@ -162,7 +162,7 @@ function App() {
               ) : (
                 <div className="text-center text-gray-400">
                   <Camera className="w-16 h-16 mx-auto mb-2" />
-                  <p>Point camera at menu</p>
+                  <p className="text-gray-700">Point camera at menu</p>
                 </div>
               )}
             </div>
@@ -268,8 +268,8 @@ function App() {
                         onClick={() => toggleDietaryRestriction(option.id)}
                         className={`p-3 rounded-lg border-2 text-left transition-colors ${
                           userPreferences.dietaryRestrictions.includes(option.id)
-                            ? 'border-blue-500 bg-blue-50 text-blue-700'
-                            : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+                            ? 'border-blue-500 bg-blue-50 text-blue-900'
+                            : 'border-gray-200 bg-white text-gray-900 hover:border-gray-300'
                         }`}
                       >
                         <div className="flex items-center gap-2">
@@ -291,8 +291,8 @@ function App() {
                         onClick={() => toggleAllergen(allergen)}
                         className={`p-3 rounded-lg border-2 text-left transition-colors ${
                           userPreferences.allergens.includes(allergen)
-                            ? 'border-red-500 bg-red-50 text-red-700'
-                            : 'border-gray-200 bg-white text-gray-700 hover:border-gray-300'
+                            ? 'border-red-500 bg-red-50 text-red-900'
+                            : 'border-gray-200 bg-white text-gray-900 hover:border-gray-300'
                         }`}
                       >
                         <span className="text-sm font-medium">{allergen}</span>
@@ -341,7 +341,7 @@ function App() {
                 <div className="text-center mb-6">
                   <Globe className="w-12 h-12 text-orange-500 mx-auto mb-4" />
                   <h3 className="text-xl font-bold text-gray-800 mb-2">Travel Mode</h3>
-                  <p className="text-gray-600">Get personalized dining recommendations for your destination</p>
+                  <p className="text-gray-800">Get personalized dining recommendations for your destination</p>
                 </div>
 
                 <div className="space-y-4 mb-6">
@@ -349,7 +349,7 @@ function App() {
                     <MapPin className="w-5 h-5 text-blue-600" />
                     <div>
                       <p className="font-medium text-gray-800">Local Cuisine</p>
-                      <p className="text-sm text-gray-600">Authentic recommendations</p>
+                      <p className="text-sm text-gray-700">Authentic recommendations</p>
                     </div>
                   </div>
 
@@ -357,7 +357,7 @@ function App() {
                     <Clock className="w-5 h-5 text-green-600" />
                     <div>
                       <p className="font-medium text-gray-800">Opening Hours</p>
-                      <p className="text-sm text-gray-600">Real-time availability</p>
+                      <p className="text-sm text-gray-700">Real-time availability</p>
                     </div>
                   </div>
 
@@ -365,7 +365,7 @@ function App() {
                     <Users className="w-5 h-5 text-purple-600" />
                     <div>
                       <p className="font-medium text-gray-800">Group Friendly</p>
-                      <p className="text-sm text-gray-600">Perfect for families</p>
+                      <p className="text-sm text-gray-700">Perfect for families</p>
                     </div>
                   </div>
                 </div>
@@ -409,7 +409,7 @@ function App() {
               {onboardingSteps[currentStep].title}
             </h2>
 
-            <p className="text-gray-600 mb-8">
+            <p className="text-gray-800 mb-8">
               {onboardingSteps[currentStep].description}
             </p>
 
