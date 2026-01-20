@@ -131,14 +131,14 @@ function App() {
             <div className="flex gap-2">
               <button
                 onClick={handleSettings}
-                className="flex items-center gap-2 bg-gray-600 text-white px-4 py-2 rounded-lg hover:bg-gray-700 transition-colors"
+                className="flex items-center gap-2 bg-gray-800 text-white px-4 py-2 rounded-lg hover:bg-gray-900 transition-colors shadow-md"
               >
                 <Settings className="w-4 h-4" />
                 Settings
               </button>
               <button
                 onClick={handleTravelMode}
-                className="flex items-center gap-2 bg-orange-600 text-white px-4 py-2 rounded-lg hover:bg-orange-700 transition-colors"
+                className="flex items-center gap-2 bg-orange-700 text-white px-4 py-2 rounded-lg hover:bg-orange-800 transition-colors shadow-md"
               >
                 <Globe className="w-4 h-4" />
                 Travel
@@ -170,7 +170,7 @@ function App() {
             {!results && !analyzing && (
               <button
                 onClick={handleScan}
-                className="w-full bg-blue-700 text-white py-3 rounded-xl font-semibold hover:bg-blue-800 transition-colors shadow-lg"
+                className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
               >
                 Scan Menu
               </button>
@@ -310,7 +310,7 @@ function App() {
                   </button>
                   <button
                     onClick={saveSettings}
-                    className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                    className="flex-1 bg-blue-700 text-white py-3 rounded-xl font-semibold hover:bg-blue-800 transition-colors flex items-center justify-center gap-2"
                   >
                     <Save className="w-4 h-4" />
                     Save Settings
@@ -377,7 +377,7 @@ function App() {
                   >
                     Cancel
                   </button>
-                  <button className="flex-1 bg-orange-500 text-white py-3 rounded-xl font-semibold hover:bg-orange-600 transition-colors">
+                  <button className="flex-1 bg-orange-600 text-white py-3 rounded-xl font-semibold hover:bg-orange-700 transition-colors">
                     Enable Travel Mode
                   </button>
                 </div>
@@ -426,7 +426,7 @@ function App() {
 
             <button
               onClick={handleNext}
-              className="w-full bg-blue-700 text-white py-3 rounded-xl font-semibold hover:bg-blue-800 transition-colors shadow-lg"
+              className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
             >
               {currentStep === onboardingSteps.length - 1 ? 'Get Started' : 'Next'}
             </button>
