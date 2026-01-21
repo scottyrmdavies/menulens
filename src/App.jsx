@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Shield, Leaf, Dumbbell, Globe, Camera, CheckCircle, X, MapPin, Clock, Users, Settings, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -14,6 +14,9 @@ function App() {
     allergens: [],
     cuisinePreferences: []
   });
+  const [cameraStream, setCameraStream] = useState(null);
+  const [cameraError, setCameraError] = useState(null);
+  const videoRef = useRef(null);
 
   const dietaryOptions = [
     { id: 'vegetarian', label: 'Vegetarian', icon: '🥬' },
@@ -81,6 +84,36 @@ function App() {
     }, 3000);
   };
 
+  const startCamera = async () => {
+    try {
+      setCameraError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' } // Use back camera on mobile
+      });
+      setCameraStream(stream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (error) {
+      console.error('Error accessing camera:', error);
+      setCameraError('Camera access denied. Please allow camera permissions and try again.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current) {
+      // For now, we'll just simulate the scan since OCR would require external APIs
+      handleScan();
+    }
+  };
+
   const handleTravelMode = () => {
     setShowTravelModal(true);
   };
@@ -121,13 +154,35 @@ function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (showCamera && !cameraStream && !cameraError) {
+      startCamera();
+    }
+    return () => {
+      stopCamera();
+    };
+  }, [showCamera]);
+
   if (showCamera) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-4">
         <div className="max-w-md mx-auto">
           {/* Header */}
           <div className="flex items-center justify-between mb-6">
-            <h1 className="text-2xl font-bold text-gray-900">MenuLens</h1>
+            <div className="flex items-center gap-4">
+              <button
+                onClick={() => {
+                  stopCamera();
+                  setShowCamera(false);
+                  setResults(null);
+                  setCameraError(null);
+                }}
+                className="text-gray-600 hover:text-gray-800 transition-colors"
+              >
+                ← Back
+              </button>
+              <h1 className="text-2xl font-bold text-gray-900">MenuLens</h1>
+            </div>
             <div className="flex gap-2">
               <button
                 onClick={handleSettings}
@@ -148,7 +203,7 @@ function App() {
 
           {/* Camera Interface */}
           <div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-            <div className="aspect-square bg-gray-100 rounded-xl mb-4 flex items-center justify-center">
+            <div className="aspect-square bg-gray-100 rounded-xl mb-4 flex items-center justify-center overflow-hidden">
               {analyzing ? (
                 <div className="text-center">
                   <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
@@ -159,21 +214,56 @@ function App() {
                   <CheckCircle className="w-16 h-16 mx-auto mb-2" />
                   <p className="font-semibold">Analysis Complete!</p>
                 </div>
+              ) : cameraError ? (
+                <div className="text-center text-red-600 p-4">
+                  <X className="w-16 h-16 mx-auto mb-2" />
+                  <p className="text-sm">{cameraError}</p>
+                  <button
+                    onClick={startCamera}
+                    className="mt-4 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                  >
+                    Try Again
+                  </button>
+                </div>
               ) : (
-                <div className="text-center text-gray-400">
-                  <Camera className="w-16 h-16 mx-auto mb-2" />
-                  <p className="text-gray-700">Point camera at menu</p>
+                <div className="w-full h-full relative">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="w-full h-full object-cover"
+                  />
+                  {!cameraStream && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-gray-100">
+                      <div className="text-center text-gray-400">
+                        <Camera className="w-16 h-16 mx-auto mb-2" />
+                        <p className="text-gray-700">Initializing camera...</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
 
-            {!results && !analyzing && (
-              <button
-                onClick={handleScan}
-                className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
-              >
-                Scan Menu
-              </button>
+            {!results && !analyzing && !cameraError && (
+              <div className="space-y-3">
+                {!cameraStream ? (
+                  <button
+                    onClick={startCamera}
+                    className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
+                  >
+                    Start Camera
+                  </button>
+                ) : (
+                  <button
+                    onClick={capturePhoto}
+                    className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
+                  >
+                    Capture & Scan Menu
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
