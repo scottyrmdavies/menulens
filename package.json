@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "scan-server": "node server/index.js",
     "build": "vite build",
+    "test": "node --test server/classify.test.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },

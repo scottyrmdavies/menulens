@@ -16,6 +16,7 @@ function App() {
   });
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraError, setCameraError] = useState(null);
+  const [scanError, setScanError] = useState(null);
   const videoRef = useRef(null);
 
   const dietaryOptions = [
@@ -63,25 +64,66 @@ function App() {
     }
   };
 
-  const handleScan = () => {
+  const capturePhoto = async () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) {
+      setScanError('Camera is not ready yet. Wait a moment and try again.');
+      return;
+    }
+
+    const maxEdge = 2000;
+    const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(video.videoWidth * scale);
+    canvas.height = Math.round(video.videoHeight * scale);
+    const context = canvas.getContext('2d');
+    if (!context) {
+      setScanError('Could not read the photo. Try again.');
+      return;
+    }
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+    if (!blob) {
+      setScanError('Could not read the photo. Try again.');
+      return;
+    }
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Could not read the photo.'));
+      reader.readAsDataURL(blob);
+    });
+    const imageBase64 = String(dataUrl).split(',')[1];
+
+    setScanError(null);
+    setResults(null);
     setAnalyzing(true);
-    setTimeout(() => {
-      setResults({
-        safeItems: [
-          "Grilled Chicken Salad (no dressing)",
-          "Steamed Vegetables",
-          "Fresh Fruit Plate",
-          "Herb-Crusted Salmon"
-        ],
-        riskyItems: [
-          "Caesar Salad (contains dairy)",
-          "Cream of Mushroom Soup",
-          "Chocolate Mousse"
-        ],
-        allergens: ["Dairy", "Nuts", "Gluten"]
+    try {
+      const response = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64,
+          mimeType: 'image/jpeg',
+          preferences: userPreferences,
+        }),
       });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        setScanError(payload?.error || 'Menu scan failed. Try another photo.');
+        return;
+      }
+      setResults({
+        safeItems: Array.isArray(payload?.safeItems) ? payload.safeItems : [],
+        riskyItems: Array.isArray(payload?.riskyItems) ? payload.riskyItems : [],
+        allergens: Array.isArray(payload?.allergens) ? payload.allergens : [],
+      });
+    } catch {
+      setScanError('Could not reach the scan server. Start it with npm run scan-server and try again.');
+    } finally {
       setAnalyzing(false);
-    }, 3000);
+    }
   };
 
   const startCamera = async () => {
@@ -104,13 +146,6 @@ function App() {
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
       setCameraStream(null);
-    }
-  };
-
-  const capturePhoto = () => {
-    if (videoRef.current) {
-      // For now, we'll just simulate the scan since OCR would require external APIs
-      handleScan();
     }
   };
 
@@ -176,6 +211,7 @@ function App() {
                   setShowCamera(false);
                   setResults(null);
                   setCameraError(null);
+                  setScanError(null);
                 }}
                 className="text-gray-600 hover:text-gray-800 transition-colors"
               >
@@ -246,6 +282,10 @@ function App() {
               )}
             </div>
 
+            {scanError && !analyzing && (
+              <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg p-3">{scanError}</p>
+            )}
+
             {!results && !analyzing && !cameraError && (
               <div className="space-y-3">
                 {!cameraStream ? (
@@ -274,6 +314,9 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               className="space-y-4"
             >
+              <p className="text-sm text-gray-700">
+                Tags marked estimate are model guesses. A diet counts as confirmed only when the menu states it.
+              </p>
               {/* Safe Items */}
               <div className="bg-white rounded-xl p-4 shadow-lg">
                 <h3 className="font-semibold text-green-700 mb-3 flex items-center gap-2">
@@ -281,6 +324,9 @@ function App() {
                   Safe Options
                 </h3>
                 <div className="space-y-2">
+                  {results.safeItems.length === 0 && (
+                    <p className="text-sm text-gray-600">No dishes matched your saved preferences.</p>
+                  )}
                   {results.safeItems.map((item, index) => (
                     <div key={index} className="flex items-center gap-3 p-2 bg-green-50 rounded-lg">
                       <CheckCircle className="w-4 h-4 text-green-600" />
@@ -297,6 +343,9 @@ function App() {
                   Contains Allergens
                 </h3>
                 <div className="space-y-2">
+                  {results.riskyItems.length === 0 && (
+                    <p className="text-sm text-gray-600">No allergen conflicts in the dishes that were read.</p>
+                  )}
                   {results.riskyItems.map((item, index) => (
                     <div key={index} className="flex items-center gap-3 p-2 bg-red-50 rounded-lg">
                       <X className="w-4 h-4 text-red-600" />
@@ -310,6 +359,9 @@ function App() {
               <div className="bg-white rounded-xl p-4 shadow-lg">
                 <h3 className="font-semibold text-orange-700 mb-3">Allergens Detected</h3>
                 <div className="flex flex-wrap gap-2">
+                  {results.allergens.length === 0 && (
+                    <p className="text-sm text-gray-600">None named on the menu text that was read.</p>
+                  )}
                   {results.allergens.map((allergen, index) => (
                     <span key={index} className="bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">
                       {allergen}
@@ -317,6 +369,16 @@ function App() {
                   ))}
                 </div>
               </div>
+
+              <button
+                onClick={() => {
+                  setResults(null);
+                  setScanError(null);
+                }}
+                className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
+              >
+                Scan another menu
+              </button>
             </motion.div>
           )}
         </div>

@@ -1,3 +1,7 @@
+# MenuLens
+
+The camera page sends a captured menu photo to `server/index.js`. That process calls Google Cloud Vision Document Text Detection, then `gemini-4-hydrogen`, and returns dishes for the existing results list. API keys stay in the server environment (`GOOGLE_CLOUD_VISION_API_KEY`, `GEMINI_API_KEY`). Copy `.env.example` to `.env` and fill them in. Start the scan server with `npm run scan-server`, then `npm run dev`. If a key is missing, the app shows that error and does not invent dishes.
+
 # React + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
