@@ -1,6 +1,61 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Shield, Leaf, Dumbbell, Globe, Camera, CheckCircle, X, MapPin, Clock, Users, Settings, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { CLIENT_MAX_IMAGE_BASE64_CHARS } from '../shared/limits.js';
+
+function frameToCanvas(video, maxEdge) {
+  const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result ?? '');
+      const comma = value.indexOf(',');
+      resolve(comma === -1 ? value : value.slice(comma + 1));
+    };
+    reader.onerror = () => reject(new Error('Could not read the photo. Try again.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Vercel Hobby drops request bodies over 4.5 MB before the scan function
+// runs. Shrink the frame until the JPEG fits, starting from a size that
+// still keeps menu type readable.
+async function compressedJpegBase64(video) {
+  let maxEdge = 2000;
+  let quality = 0.85;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const canvas = frameToCanvas(video, maxEdge);
+    if (!canvas) throw new Error('Could not read the photo. Try again.');
+    const blob = await canvasToJpeg(canvas, quality);
+    if (!blob) throw new Error('Could not read the photo. Try again.');
+    const base64 = await blobToBase64(blob);
+    if (base64.length <= CLIENT_MAX_IMAGE_BASE64_CHARS) return base64;
+    if (quality > 0.55) {
+      quality = Math.round((quality - 0.1) * 100) / 100;
+    } else if (maxEdge > 800) {
+      maxEdge = Math.round(maxEdge * 0.75);
+    } else {
+      break;
+    }
+  }
+  throw new Error('That photo is too large to scan. Move closer and try again.');
+}
 
 function App() {
   const [currentStep, setCurrentStep] = useState(0);
@@ -16,6 +71,7 @@ function App() {
   });
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraError, setCameraError] = useState(null);
+  const [scanError, setScanError] = useState(null);
   const videoRef = useRef(null);
 
   const dietaryOptions = [
@@ -63,25 +119,54 @@ function App() {
     }
   };
 
-  const handleScan = () => {
+  const capturePhoto = async () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) {
+      setScanError('Camera is not ready yet. Wait a moment and try again.');
+      return;
+    }
+
+    let imageBase64;
+    try {
+      imageBase64 = await compressedJpegBase64(video);
+    } catch (error) {
+      setScanError(error.message || 'Could not read the photo. Try again.');
+      return;
+    }
+
+    setScanError(null);
+    setResults(null);
     setAnalyzing(true);
-    setTimeout(() => {
-      setResults({
-        safeItems: [
-          "Grilled Chicken Salad (no dressing)",
-          "Steamed Vegetables",
-          "Fresh Fruit Plate",
-          "Herb-Crusted Salmon"
-        ],
-        riskyItems: [
-          "Caesar Salad (contains dairy)",
-          "Cream of Mushroom Soup",
-          "Chocolate Mousse"
-        ],
-        allergens: ["Dairy", "Nuts", "Gluten"]
+    try {
+      const response = await fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64,
+          mimeType: 'image/jpeg',
+          preferences: userPreferences,
+        }),
       });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        const message = typeof payload?.error === 'string' ? payload.error : '';
+        if (response.status === 413) {
+          setScanError(message || 'That photo is too large to scan. Move closer and try again.');
+          return;
+        }
+        setScanError(message || 'Menu scan failed. Try another photo.');
+        return;
+      }
+      setResults({
+        safeItems: Array.isArray(payload?.safeItems) ? payload.safeItems : [],
+        riskyItems: Array.isArray(payload?.riskyItems) ? payload.riskyItems : [],
+        allergens: Array.isArray(payload?.allergens) ? payload.allergens : [],
+      });
+    } catch {
+      setScanError('Could not reach the menu scanner. Check your connection and try again.');
+    } finally {
       setAnalyzing(false);
-    }, 3000);
+    }
   };
 
   const startCamera = async () => {
@@ -104,13 +189,6 @@ function App() {
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
       setCameraStream(null);
-    }
-  };
-
-  const capturePhoto = () => {
-    if (videoRef.current) {
-      // For now, we'll just simulate the scan since OCR would require external APIs
-      handleScan();
     }
   };
 
@@ -163,6 +241,13 @@ function App() {
     };
   }, [showCamera]);
 
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && cameraStream && video.srcObject !== cameraStream) {
+      video.srcObject = cameraStream;
+    }
+  }, [cameraStream, analyzing, results, cameraError]);
+
   if (showCamera) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-4">
@@ -176,6 +261,7 @@ function App() {
                   setShowCamera(false);
                   setResults(null);
                   setCameraError(null);
+                  setScanError(null);
                 }}
                 className="text-gray-600 hover:text-gray-800 transition-colors"
               >
@@ -246,6 +332,10 @@ function App() {
               )}
             </div>
 
+            {scanError && !analyzing && (
+              <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg p-3">{scanError}</p>
+            )}
+
             {!results && !analyzing && !cameraError && (
               <div className="space-y-3">
                 {!cameraStream ? (
@@ -274,6 +364,9 @@ function App() {
               animate={{ opacity: 1, y: 0 }}
               className="space-y-4"
             >
+              <p className="text-sm text-gray-700">
+                Tags marked estimate are model guesses. A diet counts as confirmed only when the menu states it.
+              </p>
               {/* Safe Items */}
               <div className="bg-white rounded-xl p-4 shadow-lg">
                 <h3 className="font-semibold text-green-700 mb-3 flex items-center gap-2">
@@ -281,6 +374,9 @@ function App() {
                   Safe Options
                 </h3>
                 <div className="space-y-2">
+                  {results.safeItems.length === 0 && (
+                    <p className="text-sm text-gray-600">No dishes matched your saved preferences.</p>
+                  )}
                   {results.safeItems.map((item, index) => (
                     <div key={index} className="flex items-center gap-3 p-2 bg-green-50 rounded-lg">
                       <CheckCircle className="w-4 h-4 text-green-600" />
@@ -297,6 +393,9 @@ function App() {
                   Contains Allergens
                 </h3>
                 <div className="space-y-2">
+                  {results.riskyItems.length === 0 && (
+                    <p className="text-sm text-gray-600">No allergen conflicts in the dishes that were read.</p>
+                  )}
                   {results.riskyItems.map((item, index) => (
                     <div key={index} className="flex items-center gap-3 p-2 bg-red-50 rounded-lg">
                       <X className="w-4 h-4 text-red-600" />
@@ -310,6 +409,9 @@ function App() {
               <div className="bg-white rounded-xl p-4 shadow-lg">
                 <h3 className="font-semibold text-orange-700 mb-3">Allergens Detected</h3>
                 <div className="flex flex-wrap gap-2">
+                  {results.allergens.length === 0 && (
+                    <p className="text-sm text-gray-600">None named on the menu text that was read.</p>
+                  )}
                   {results.allergens.map((allergen, index) => (
                     <span key={index} className="bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">
                       {allergen}
@@ -317,6 +419,16 @@ function App() {
                   ))}
                 </div>
               </div>
+
+              <button
+                onClick={() => {
+                  setResults(null);
+                  setScanError(null);
+                }}
+                className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
+              >
+                Scan another menu
+              </button>
             </motion.div>
           )}
         </div>
