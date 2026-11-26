@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createScanServer } from './index.js';
-import { BUSY_BACKOFF_MS, BUSY_MESSAGE, GEMINI_MODELS, GEMINI_URL, handleRawBody, scanResponse } from './scan.js';
+import { BUSY_MESSAGE, FAST_MODEL, GEMINI_MODELS, GEMINI_URL, handleRawBody, scanResponse } from './scan.js';
 
 function tinyJpeg() {
   return Buffer.from([
@@ -77,6 +77,21 @@ test('gemini-only scan reads the photo and does not call Vision', async () => {
   assert.match(requestBody.contents[0].parts[1].text, /basis "stated"/);
   assert.equal(requestBody.contents[0].parts[1].text.includes('optional OCR pass'), false);
   assert.equal(requestBody.generationConfig.responseMimeType, 'application/json');
+  assert.equal(requestBody.generationConfig.thinkingConfig.thinkingLevel, 'MINIMAL');
+  assert.match(calls[0].url, /gemini-3\.5-flash-lite:streamGenerateContent/);
+});
+
+test('stripe keys without a database do not block scans', async () => {
+  const result = await scanResponse(scanBody({ userId: 'user-1' }), {
+    env: {
+      GEMINI_API_KEY: 'test-gemini-key',
+      STRIPE_SECRET_KEY: 'sk_test_example',
+      STRIPE_PRICE_ID: 'price_example',
+    },
+    fetch: async () => geminiResult(DISHES),
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
 });
 
 test('a missing Gemini key returns 503 and does not invent dishes', async () => {
@@ -131,72 +146,52 @@ function busyResponse(message, status = 503) {
   return new Response(JSON.stringify({ error: { message } }), { status });
 }
 
-function instantSleep() {
-  const delays = [];
-  return {
-    delays,
-    sleep: async (ms) => {
-      delays.push(ms);
-    },
-  };
-}
-
-test('a busy model is retried with backoff before another model is called', async () => {
-  const { delays, sleep } = instantSleep();
-  let calls = 0;
+test('two keys race and the first successful answer is kept', async () => {
+  const keys = [];
   const result = await scanResponse(scanBody(), {
-    env: { GEMINI_API_KEY: 'test-gemini-key' },
-    sleep,
-    fetch: async (url) => {
-      calls += 1;
-      assert.match(String(url), /models\/gemini-4-hydrogen:generateContent$/);
-      if (calls < 3) {
-        return busyResponse('The model is currently experiencing high demand. Please try again later.');
+    env: { GEMINI_API_KEY: 'free-key', GEMINI_API_KEY_2: 'paid-key' },
+    fetch: async (url, init) => {
+      const key = init.headers['x-goog-api-key'];
+      keys.push(key);
+      assert.match(String(url), /gemini-3\.5-flash-lite:streamGenerateContent/);
+      if (key === 'free-key') {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return geminiResult([{ name: 'Slow Soup', allergens: [], tags: [{ id: 'vegan', basis: 'stated' }] }]);
       }
-      return geminiResult(DISHES);
+      return geminiResult([{ name: 'Fast Soup', allergens: [], tags: [{ id: 'vegan', basis: 'stated' }] }]);
     },
   });
-
   assert.equal(result.status, 200);
-  assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
-  assert.equal(calls, 3);
-  assert.deepEqual(delays, [...BUSY_BACKOFF_MS]);
+  assert.deepEqual(result.body.safeItems, ['Fast Soup — Vegan']);
+  assert.deepEqual(keys.sort(), ['free-key', 'paid-key']);
 });
 
-test('a busy hydrogen model falls back to flash, then flash-lite can finish the scan', async () => {
+test('a busy fast model falls back once to flash inside the speed budget', async () => {
   const urls = [];
   const result = await scanResponse(scanBody(), {
-    env: { GEMINI_API_KEY: 'test-gemini-key' },
-    sleep: async () => {},
+    env: { GEMINI_API_KEY: 'free-key', GEMINI_API_KEY_2: 'paid-key' },
     fetch: async (url, init) => {
       const modelUrl = String(url);
       urls.push(modelUrl);
-      if (modelUrl.includes('gemini-4-hydrogen') || modelUrl.includes('gemini-3.8-flash')) {
-        return busyResponse('high demand', modelUrl.includes('flash') ? 429 : 503);
-      }
+      if (modelUrl.includes('gemini-3.5-flash-lite')) return busyResponse('high demand', 503);
       const body = JSON.parse(init.body);
-      assert.equal(body.contents[0].parts[0].inline_data.data, tinyJpeg());
       assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, 'LOW');
+      assert.equal(init.headers['x-goog-api-key'], 'free-key');
       return geminiResult(DISHES);
     },
   });
-
   assert.equal(result.status, 200);
   assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
-  assert.deepEqual(
-    GEMINI_MODELS.map((model) => model.id),
-    ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'],
-  );
-  assert.equal(urls.filter((url) => url.includes('gemini-4-hydrogen')).length, 3);
-  assert.equal(urls.filter((url) => url.includes('gemini-3.8-flash')).length, 3);
-  assert.equal(urls.filter((url) => url.includes('gemini-3.5-flash-lite')).length, 1);
+  assert.deepEqual(GEMINI_MODELS.map((model) => model.id), ['gemini-3.5-flash-lite', 'gemini-3.8-flash']);
+  assert.equal(FAST_MODEL.thinkingLevel, 'MINIMAL');
+  assert.equal(urls.filter((url) => url.includes('gemini-3.5-flash-lite')).length, 2);
+  assert.equal(urls.filter((url) => url.includes('gemini-3.8-flash')).length, 1);
 });
 
-test('when every free model is busy, the error asks for a retry and invents no dishes', async () => {
+test('when every model is busy, the error asks for a retry and invents no dishes', async () => {
   const urls = [];
   const result = await scanResponse(scanBody(), {
     env: { GEMINI_API_KEY: 'test-gemini-key' },
-    sleep: async () => {},
     fetch: async (url) => {
       urls.push(String(url));
       assert.equal(String(url).includes('vision.googleapis.com'), false);
@@ -207,17 +202,16 @@ test('when every free model is busy, the error asks for a retry and invents no d
   assert.equal(result.status, 503);
   assert.equal(result.body.error, BUSY_MESSAGE);
   assert.equal(result.body.safeItems, undefined);
-  assert.equal(urls.length, GEMINI_MODELS.length * 3);
+  assert.equal(urls.length, GEMINI_MODELS.length);
 });
 
-test('a timed-out model is not retried, and the next model can still read the menu', async () => {
+test('a timed-out fast model is not retried, and flash can still read the menu', async () => {
   const urls = [];
   const result = await scanResponse(scanBody(), {
     env: { GEMINI_API_KEY: 'test-gemini-key' },
-    sleep: async () => {},
     fetch: async (url) => {
       urls.push(String(url));
-      if (String(url).includes('gemini-4-hydrogen')) {
+      if (String(url).includes('gemini-3.5-flash-lite')) {
         const error = new Error('The operation was aborted');
         error.name = 'AbortError';
         throw error;
@@ -228,20 +222,52 @@ test('a timed-out model is not retried, and the next model can still read the me
 
   assert.equal(result.status, 200);
   assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
-  assert.equal(urls.filter((url) => url.includes('gemini-4-hydrogen')).length, 1);
+  assert.equal(urls.filter((url) => url.includes('gemini-3.5-flash-lite')).length, 1);
   assert.match(urls.at(-1), /gemini-3\.8-flash/);
 });
 
-test('a gemini request error that is not about the photo is kept', async () => {
+test('a streamed menu fills dishes as complete objects arrive', async () => {
+  const part1 = '{"dishes":[{"name":"Lentil Soup","allergens":[],"tags":[{"id":"vegan","basis":"stated"}]}';
+  const part2 = ',{"name":"Pad Thai","allergens":["peanuts"],"tags":[]}]}';
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const part of [part1, part2]) {
+        const payload = JSON.stringify({
+          candidates: [{ content: { parts: [{ text: part }] } }],
+        });
+        controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+      }
+      controller.close();
+    },
+  });
   const result = await scanResponse(scanBody(), {
     env: { GEMINI_API_KEY: 'test-gemini-key' },
-    fetch: async () => new Response(
-      JSON.stringify({ error: { message: 'thinkingLevel is invalid' } }),
-      { status: 400 },
-    ),
+    fetch: async () => new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    }),
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
+  assert.match(result.body.riskyItems[0], /Pad Thai/);
+});
+
+test('a gemini request error that is not about the photo is kept', async () => {
+  let calls = 0;
+  const result = await scanResponse(scanBody(), {
+    env: { GEMINI_API_KEY: 'test-gemini-key' },
+    fetch: async () => {
+      calls += 1;
+      return new Response(
+        JSON.stringify({ error: { message: 'thinkingLevel is invalid' } }),
+        { status: 400 },
+      );
+    },
   });
   assert.equal(result.status, 502);
   assert.match(result.body.error, /thinkingLevel is invalid/);
+  assert.equal(calls, 1);
 });
 
 test('a photo gemini cannot read is a client error', async () => {
@@ -326,10 +352,15 @@ test('POST /api/scan speaks the frontend contract on the gemini-only path', asyn
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(scanBody()),
     });
-    const payload = await response.json();
+    const text = await response.text();
     assert.equal(response.status, 200);
-    assert.deepEqual(Object.keys(payload).sort(), ['allergens', 'riskyItems', 'safeItems']);
-    assert.deepEqual(payload.safeItems, ['Lentil Soup — Vegan']);
+    assert.match(response.headers.get('content-type') || '', /ndjson/);
+    const events = text.trim().split('\n').map((line) => JSON.parse(line));
+    const done = events.find((event) => event.type === 'done');
+    assert.equal(events[0].type, 'dish');
+    assert.deepEqual(Object.keys(done).sort(), ['allergens', 'dishCount', 'durationMs', 'model', 'riskyItems', 'safeItems', 'type']);
+    assert.deepEqual(done.safeItems, ['Lentil Soup — Vegan']);
+    assert.equal(typeof done.durationMs, 'number');
     assert.equal(urls.length, 1);
     assert.equal(urls[0], GEMINI_URL);
   } finally {
