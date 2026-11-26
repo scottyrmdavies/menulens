@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createScanServer } from './index.js';
-import { GEMINI_URL, handleRawBody, scanResponse } from './scan.js';
+import { BUSY_BACKOFF_MS, BUSY_MESSAGE, GEMINI_MODELS, GEMINI_URL, handleRawBody, scanResponse } from './scan.js';
 
 function tinyJpeg() {
   return Buffer.from([
@@ -127,25 +127,109 @@ test('an oversized photo is rejected before Gemini', async () => {
   assert.match(result.body.error, /too large/);
 });
 
-test('gemini errors are returned without calling Vision', async () => {
+function busyResponse(message, status = 503) {
+  return new Response(JSON.stringify({ error: { message } }), { status });
+}
+
+function instantSleep() {
+  const delays = [];
+  return {
+    delays,
+    sleep: async (ms) => {
+      delays.push(ms);
+    },
+  };
+}
+
+test('a busy model is retried with backoff before another model is called', async () => {
+  const { delays, sleep } = instantSleep();
+  let calls = 0;
   const result = await scanResponse(scanBody(), {
     env: { GEMINI_API_KEY: 'test-gemini-key' },
+    sleep,
     fetch: async (url) => {
-      assert.equal(String(url).includes('vision.googleapis.com'), false);
-      return new Response(JSON.stringify({ error: { message: 'model overloaded' } }), { status: 503 });
+      calls += 1;
+      assert.match(String(url), /models\/gemini-4-hydrogen:generateContent$/);
+      if (calls < 3) {
+        return busyResponse('The model is currently experiencing high demand. Please try again later.');
+      }
+      return geminiResult(DISHES);
     },
   });
-  assert.equal(result.status, 502);
-  assert.match(result.body.error, /model overloaded/);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [...BUSY_BACKOFF_MS]);
 });
 
-test('gemini quota errors stay a 429', async () => {
+test('a busy hydrogen model falls back to flash, then flash-lite can finish the scan', async () => {
+  const urls = [];
   const result = await scanResponse(scanBody(), {
     env: { GEMINI_API_KEY: 'test-gemini-key' },
-    fetch: async () => new Response(JSON.stringify({ error: { message: 'rate limit' } }), { status: 429 }),
+    sleep: async () => {},
+    fetch: async (url, init) => {
+      const modelUrl = String(url);
+      urls.push(modelUrl);
+      if (modelUrl.includes('gemini-4-hydrogen') || modelUrl.includes('gemini-3.8-flash')) {
+        return busyResponse('high demand', modelUrl.includes('flash') ? 429 : 503);
+      }
+      const body = JSON.parse(init.body);
+      assert.equal(body.contents[0].parts[0].inline_data.data, tinyJpeg());
+      assert.equal(body.generationConfig.thinkingConfig.thinkingLevel, 'LOW');
+      return geminiResult(DISHES);
+    },
   });
-  assert.equal(result.status, 429);
-  assert.match(result.body.error, /free Gemini quota/);
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
+  assert.deepEqual(
+    GEMINI_MODELS.map((model) => model.id),
+    ['gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.5-flash-lite'],
+  );
+  assert.equal(urls.filter((url) => url.includes('gemini-4-hydrogen')).length, 3);
+  assert.equal(urls.filter((url) => url.includes('gemini-3.8-flash')).length, 3);
+  assert.equal(urls.filter((url) => url.includes('gemini-3.5-flash-lite')).length, 1);
+});
+
+test('when every free model is busy, the error asks for a retry and invents no dishes', async () => {
+  const urls = [];
+  const result = await scanResponse(scanBody(), {
+    env: { GEMINI_API_KEY: 'test-gemini-key' },
+    sleep: async () => {},
+    fetch: async (url) => {
+      urls.push(String(url));
+      assert.equal(String(url).includes('vision.googleapis.com'), false);
+      return busyResponse('model is currently experiencing high demand');
+    },
+  });
+
+  assert.equal(result.status, 503);
+  assert.equal(result.body.error, BUSY_MESSAGE);
+  assert.equal(result.body.safeItems, undefined);
+  assert.equal(urls.length, GEMINI_MODELS.length * 3);
+});
+
+test('a timed-out model is not retried, and the next model can still read the menu', async () => {
+  const urls = [];
+  const result = await scanResponse(scanBody(), {
+    env: { GEMINI_API_KEY: 'test-gemini-key' },
+    sleep: async () => {},
+    fetch: async (url) => {
+      urls.push(String(url));
+      if (String(url).includes('gemini-4-hydrogen')) {
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        throw error;
+      }
+      return geminiResult(DISHES);
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.deepEqual(result.body.safeItems, ['Lentil Soup — Vegan']);
+  assert.equal(urls.filter((url) => url.includes('gemini-4-hydrogen')).length, 1);
+  assert.match(urls.at(-1), /gemini-3\.8-flash/);
 });
 
 test('a gemini request error that is not about the photo is kept', async () => {
