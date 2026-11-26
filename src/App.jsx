@@ -1,142 +1,255 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Shield, Leaf, Dumbbell, Globe, Camera, CheckCircle, X, MapPin, Clock, Users, Settings, Save } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { CLIENT_MAX_IMAGE_BASE64_CHARS } from '../shared/limits.js';
+import { useEffect, useRef, useState } from 'react';
+import { Camera, CheckCircle, X } from 'lucide-react';
+import Admin from './Admin.jsx';
+import { compressedJpegBase64, fileToBitmap } from './photo.js';
+import { readScanResponse } from './scanClient.js';
+import { DIET_CHIPS, preferencesFromProfile } from '../shared/profile.js';
+import { offersFor } from '../shared/crossSell.js';
+import { INSTALL_SNIPPET } from '../shared/install.js';
+import { LOCALE_LABELS, normalizeLocale, t } from '../shared/i18n.js';
 
-function frameToCanvas(video, maxEdge) {
-  const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
-  const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-  const context = canvas.getContext('2d');
-  if (!context) return null;
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = 'high';
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
-  return canvas;
-}
-
-function canvasToJpeg(canvas, quality) {
-  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
-}
-
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const value = String(reader.result ?? '');
-      const comma = value.indexOf(',');
-      resolve(comma === -1 ? value : value.slice(comma + 1));
-    };
-    reader.onerror = () => reject(new Error('Could not read the photo. Try again.'));
-    reader.readAsDataURL(blob);
-  });
-}
-
-// Vercel Hobby drops request bodies over 4.5 MB before the scan function
-// runs. Shrink the frame until the JPEG fits, starting from a size that
-// still keeps menu type readable.
-async function compressedJpegBase64(video) {
-  let maxEdge = 2000;
-  let quality = 0.85;
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const canvas = frameToCanvas(video, maxEdge);
-    if (!canvas) throw new Error('Could not read the photo. Try again.');
-    const blob = await canvasToJpeg(canvas, quality);
-    if (!blob) throw new Error('Could not read the photo. Try again.');
-    const base64 = await blobToBase64(blob);
-    if (base64.length <= CLIENT_MAX_IMAGE_BASE64_CHARS) return base64;
-    if (quality > 0.55) {
-      quality = Math.round((quality - 0.1) * 100) / 100;
-    } else if (maxEdge > 800) {
-      maxEdge = Math.round(maxEdge * 0.75);
-    } else {
-      break;
+function loadProfile() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('menulens-profile') || '');
+    if (saved && Array.isArray(saved.diets)) {
+      return {
+        diets: saved.diets.filter((id) => typeof id === 'string'),
+        other: typeof saved.other === 'string' ? saved.other : '',
+        email: typeof saved.email === 'string' ? saved.email : '',
+      };
     }
+  } catch {
+    // A bad saved profile just starts onboarding again.
   }
-  throw new Error('That photo is too large to scan. Move closer and try again.');
+  return { diets: [], other: '', email: '' };
 }
 
-function App() {
-  const [currentStep, setCurrentStep] = useState(0);
-  const [showCamera, setShowCamera] = useState(false);
-  const [analyzing, setAnalyzing] = useState(false);
-  const [results, setResults] = useState(null);
-  const [showTravelModal, setShowTravelModal] = useState(false);
-  const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [userPreferences, setUserPreferences] = useState({
-    dietaryRestrictions: [],
-    allergens: [],
-    cuisinePreferences: []
-  });
-  const [cameraStream, setCameraStream] = useState(null);
-  const [cameraError, setCameraError] = useState(null);
-  const [scanError, setScanError] = useState(null);
-  const videoRef = useRef(null);
+function userId() {
+  const key = 'menulens-user';
+  let current = localStorage.getItem(key);
+  if (!current) {
+    current = crypto.randomUUID();
+    localStorage.setItem(key, current);
+  }
+  return current;
+}
 
-  const dietaryOptions = [
-    { id: 'vegetarian', label: 'Vegetarian', icon: '🥬' },
-    { id: 'vegan', label: 'Vegan', icon: '🌱' },
-    { id: 'gluten-free', label: 'Gluten-Free', icon: '🌾' },
-    { id: 'dairy-free', label: 'Dairy-Free', icon: '🥛' },
-    { id: 'nut-free', label: 'Nut-Free', icon: '🥜' },
-    { id: 'low-carb', label: 'Low-Carb', icon: '🥩' },
-    { id: 'keto', label: 'Keto', icon: '🥑' },
-    { id: 'halal', label: 'Halal', icon: '☪️' },
-    { id: 'kosher', label: 'Kosher', icon: '✡️' }
-  ];
+function LanguageSelect({ language, onChange }) {
+  return (
+    <label className="flex items-center gap-2 text-sm text-gray-800">
+      <span>{t(language, 'language')}</span>
+      <select
+        value={language}
+        onChange={(event) => onChange(normalizeLocale(event.target.value))}
+        className="bg-white border border-gray-300 rounded-lg px-2 py-1"
+      >
+        {Object.entries(LOCALE_LABELS).map(([code, label]) => (
+          <option key={code} value={code}>{label}</option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
-  const allergenOptions = [
-    'Peanuts', 'Tree Nuts', 'Milk', 'Eggs', 'Fish', 'Shellfish', 'Wheat', 'Soy', 'Sesame'
-  ];
+function Disclaimer({ language }) {
+  return <p className="text-sm text-gray-800 bg-amber-50 border border-amber-200 rounded-lg p-3">{t(language, 'disclaimer')}</p>;
+}
 
-  const onboardingSteps = [
-    {
-      icon: Shield,
-      title: "Welcome to MenuLens",
-      description: "Your personal dietary assistant for safer dining out",
-      color: "text-blue-800"
-    },
-    {
-      icon: Leaf,
-      title: "Scan Any Menu",
-      description: "Use your camera to scan restaurant menus instantly",
-      color: "text-green-800"
-    },
-    {
-      icon: Dumbbell,
-      title: "Get Instant Results",
-      description: "Receive detailed analysis of allergens and dietary restrictions",
-      color: "text-purple-800"
-    }
-  ];
+function OfferList({ diets, language }) {
+  const offers = offersFor(diets, language);
+  if (offers.length === 0) return null;
+  return (
+    <div className="space-y-3">
+      {offers.map((offer) => (
+        <div key={offer.id} className="bg-white rounded-xl p-4 shadow text-sm text-gray-800">
+          <p>{offer.body}</p>
+          {offer.href && (
+            <a className="inline-block mt-2 text-blue-800 underline" href={offer.href} target="_blank" rel="noreferrer">
+              {offer.href.replace('https://', '')}
+            </a>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
-  const handleNext = () => {
-    if (currentStep < onboardingSteps.length - 1) {
-      setCurrentStep(currentStep + 1);
-    } else {
-      setShowCamera(true);
+function InstallPanel({ language }) {
+  const [copied, setCopied] = useState(false);
+  const [installEvent, setInstallEvent] = useState(null);
+
+  useEffect(() => {
+    const onPrompt = (event) => {
+      event.preventDefault();
+      setInstallEvent(event);
+    };
+    window.addEventListener('beforeinstallprompt', onPrompt);
+    return () => window.removeEventListener('beforeinstallprompt', onPrompt);
+  }, []);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(INSTALL_SNIPPET);
+      setCopied(true);
+    } catch {
+      setCopied(false);
     }
   };
 
-  const capturePhoto = async () => {
-    const video = videoRef.current;
-    if (!video || !video.videoWidth) {
-      setScanError('Camera is not ready yet. Wait a moment and try again.');
-      return;
-    }
+  return (
+    <div className="bg-white rounded-xl p-4 shadow text-sm text-gray-800 space-y-2">
+      <h2 className="font-semibold">{t(language, 'installTitle')}</h2>
+      <p>{t(language, 'installSnippet')}</p>
+      <div className="flex gap-2">
+        <button type="button" onClick={copy} className="bg-gray-200 text-gray-900 px-3 py-2 rounded-lg">
+          {copied ? t(language, 'copied') : t(language, 'copy')}
+        </button>
+        {installEvent && (
+          <button
+            type="button"
+            onClick={async () => {
+              await installEvent.prompt();
+              setInstallEvent(null);
+            }}
+            className="bg-blue-800 text-white px-3 py-2 rounded-lg"
+          >
+            {t(language, 'installButton')}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
+function SkeletonRows() {
+  return (
+    <div className="space-y-2" aria-hidden="true">
+      {[0, 1, 2, 3].map((row) => (
+        <div key={row} className="h-10 rounded-lg bg-gray-200 animate-pulse" />
+      ))}
+    </div>
+  );
+}
+
+function ResultList({ title, items, empty, tone }) {
+  const toneClass = tone === 'safe' ? 'text-green-700' : 'text-red-700';
+  const rowClass = tone === 'safe' ? 'bg-green-50' : 'bg-red-50';
+  return (
+    <div className="bg-white rounded-xl p-4 shadow">
+      <h3 className={`font-semibold mb-3 ${toneClass}`}>{title}</h3>
+      <div className="space-y-2">
+        {items.length === 0 && <p className="text-sm text-gray-600">{empty}</p>}
+        {items.map((item, index) => (
+          <div key={`${item}-${index}`} className={`p-2 rounded-lg text-sm ${rowClass}`}>{item}</div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [language, setLanguage] = useState(() => normalizeLocale(localStorage.getItem('menulens-language') || navigator.language));
+  const [profile, setProfile] = useState(loadProfile);
+  const [step, setStep] = useState(() => (loadProfile().diets.length > 0 ? 'scan' : 'welcome'));
+  const [consent, setConsent] = useState(false);
+  const [emailNote, setEmailNote] = useState('');
+  const [id] = useState(userId);
+  const [access, setAccess] = useState({ allowed: true, mode: 'free' });
+  const [billingNote, setBillingNote] = useState('');
+  const [phase, setPhase] = useState('idle');
+  const [results, setResults] = useState(null);
+  const [scanError, setScanError] = useState('');
+  const [cameraStream, setCameraStream] = useState(null);
+  const [cameraFailed, setCameraFailed] = useState(false);
+  const videoRef = useRef(null);
+  const fileRef = useRef(null);
+
+  useEffect(() => {
+    localStorage.setItem('menulens-language', language);
+  }, [language]);
+
+  useEffect(() => {
+    localStorage.setItem('menulens-profile', JSON.stringify(profile));
+  }, [profile]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/access', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: id }),
+    })
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!cancelled && payload && typeof payload.allowed === 'boolean') setAccess(payload);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
+
+  useEffect(() => {
+    if (step !== 'scan' || !navigator.mediaDevices?.getUserMedia) return undefined;
+    let active = true;
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+      .then((stream) => {
+        if (!active) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        setCameraStream(stream);
+        setCameraFailed(false);
+        if (videoRef.current) videoRef.current.srcObject = stream;
+      })
+      .catch(() => {
+        if (active) setCameraFailed(true);
+      });
+    return () => {
+      active = false;
+      setCameraStream((current) => {
+        current?.getTracks().forEach((track) => track.stop());
+        return null;
+      });
+    };
+  }, [step]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && cameraStream && video.srcObject !== cameraStream) {
+      video.srcObject = cameraStream;
+    }
+  }, [cameraStream, phase, results]);
+
+  if (window.location.pathname === '/admin') return <Admin />;
+
+  const cameraUnsupported = step === 'scan' && !navigator.mediaDevices?.getUserMedia;
+  const showCameraError = cameraFailed || cameraUnsupported;
+
+  const toggleDiet = (chipId) => {
+    setProfile((current) => ({
+      ...current,
+      diets: current.diets.includes(chipId)
+        ? current.diets.filter((id) => id !== chipId)
+        : [...current.diets, chipId],
+    }));
+  };
+
+  const runScan = async (source) => {
+    if (access.allowed === false) return;
+    setScanError('');
+    setResults(null);
+    setPhase('preparing');
     let imageBase64;
     try {
-      imageBase64 = await compressedJpegBase64(video);
+      imageBase64 = await compressedJpegBase64(source);
     } catch (error) {
-      setScanError(error.message || 'Could not read the photo. Try again.');
+      setPhase('idle');
+      setScanError(error.message || t(language, 'scanFailed'));
       return;
     }
-
-    setScanError(null);
-    setResults(null);
-    setAnalyzing(true);
+    setPhase('reading');
+    setResults({ safeItems: [], riskyItems: [], allergens: [], partial: true });
     try {
       const response = await fetch('/api/scan', {
         method: 'POST',
@@ -144,496 +257,311 @@ function App() {
         body: JSON.stringify({
           imageBase64,
           mimeType: 'image/jpeg',
-          preferences: userPreferences,
+          userId: id,
+          preferences: preferencesFromProfile(profile, language),
+        }),
+      });
+      const outcome = await readScanResponse(response, (event) => {
+        if (event.type === 'dish' || event.type === 'done') {
+          setResults({
+            safeItems: event.safeItems || [],
+            riskyItems: event.riskyItems || [],
+            allergens: event.allergens || [],
+            durationMs: event.durationMs,
+            partial: event.type !== 'done',
+          });
+        }
+        if (event.type === 'error') setScanError(event.error || t(language, 'scanFailed'));
+      });
+      if (!outcome.ok) {
+        const message = typeof outcome.payload?.error === 'string' ? outcome.payload.error : '';
+        if (outcome.status === 402) setAccess({ allowed: false, mode: 'expired' });
+        setResults(null);
+        setScanError(message || (outcome.status === 413 ? t(language, 'tooLarge') : t(language, 'scanFailed')));
+        setPhase('idle');
+        return;
+      }
+      if (outcome.payload?.type === 'error') {
+        setResults(null);
+        setScanError(outcome.payload.error || t(language, 'scanFailed'));
+        setPhase('idle');
+        return;
+      }
+      setPhase('done');
+    } catch {
+      setResults(null);
+      setScanError(t(language, 'network'));
+      setPhase('idle');
+    }
+  };
+
+  const capturePhoto = async () => {
+    const video = videoRef.current;
+    if (!video?.videoWidth) {
+      setScanError(t(language, 'tryAgain'));
+      return;
+    }
+    await runScan(video);
+  };
+
+  const onFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    try {
+      const bitmap = await fileToBitmap(file);
+      await runScan(bitmap);
+    } catch (error) {
+      setScanError(error.message || t(language, 'scanFailed'));
+    }
+  };
+
+  const saveEmail = async () => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(profile.email.trim())) {
+      setEmailNote(t(language, 'emailInvalid'));
+      return;
+    }
+    if (!consent) {
+      setEmailNote(t(language, 'consentRequired'));
+      return;
+    }
+    setEmailNote('');
+    try {
+      const response = await fetch('/api/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: id,
+          email: profile.email.trim(),
+          diets: profile.diets,
+          other: profile.other,
+          consent: true,
         }),
       });
       const payload = await response.json().catch(() => null);
-      if (!response.ok) {
-        const message = typeof payload?.error === 'string' ? payload.error : '';
-        if (response.status === 413) {
-          setScanError(message || 'That photo is too large to scan. Move closer and try again.');
-          return;
-        }
-        setScanError(message || 'Menu scan failed. Try another photo.');
+      setEmailNote(payload?.saved ? t(language, 'emailSaved') : t(language, 'emailNotStored'));
+    } catch {
+      setEmailNote(t(language, 'emailNotStored'));
+    }
+    setStep('scan');
+  };
+
+  const subscribe = async () => {
+    setBillingNote('');
+    try {
+      const response = await fetch('/api/checkout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: id }),
+      });
+      const payload = await response.json().catch(() => null);
+      if (payload?.url) {
+        window.location.href = payload.url;
         return;
       }
-      setResults({
-        safeItems: Array.isArray(payload?.safeItems) ? payload.safeItems : [],
-        riskyItems: Array.isArray(payload?.riskyItems) ? payload.riskyItems : [],
-        allergens: Array.isArray(payload?.allergens) ? payload.allergens : [],
-      });
+      setBillingNote(payload?.configured === false ? t(language, 'billingOff') : (payload?.error || t(language, 'billingOff')));
     } catch {
-      setScanError('Could not reach the menu scanner. Check your connection and try again.');
-    } finally {
-      setAnalyzing(false);
+      setBillingNote(t(language, 'billingOff'));
     }
   };
 
-  const startCamera = async () => {
+  const manage = async () => {
+    setBillingNote('');
     try {
-      setCameraError(null);
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' } // Use back camera on mobile
+      const response = await fetch('/api/portal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: id }),
       });
-      setCameraStream(stream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
+      const payload = await response.json().catch(() => null);
+      if (payload?.url) {
+        window.location.href = payload.url;
+        return;
       }
-    } catch (error) {
-      console.error('Error accessing camera:', error);
-      setCameraError('Camera access denied. Please allow camera permissions and try again.');
+      setBillingNote(payload?.configured === false ? t(language, 'billingOff') : (payload?.error || t(language, 'billingOff')));
+    } catch {
+      setBillingNote(t(language, 'billingOff'));
     }
   };
 
-  const stopCamera = () => {
-    if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
-      setCameraStream(null);
-    }
-  };
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-4">
+      <div className="max-w-md mx-auto space-y-4">
+        <div className="flex items-center justify-between">
+          <h1 className="text-2xl font-bold text-gray-900">MenuLens</h1>
+          <LanguageSelect language={language} onChange={setLanguage} />
+        </div>
 
-  const handleTravelMode = () => {
-    setShowTravelModal(true);
-  };
-
-  const handleSettings = () => {
-    setShowSettingsModal(true);
-  };
-
-  const toggleDietaryRestriction = (restriction) => {
-    setUserPreferences(prev => ({
-      ...prev,
-      dietaryRestrictions: prev.dietaryRestrictions.includes(restriction)
-        ? prev.dietaryRestrictions.filter(r => r !== restriction)
-        : [...prev.dietaryRestrictions, restriction]
-    }));
-  };
-
-  const toggleAllergen = (allergen) => {
-    setUserPreferences(prev => ({
-      ...prev,
-      allergens: prev.allergens.includes(allergen)
-        ? prev.allergens.filter(a => a !== allergen)
-        : [...prev.allergens, allergen]
-    }));
-  };
-
-  const saveSettings = () => {
-    setShowSettingsModal(false);
-    // Here you could save to localStorage or send to backend
-    localStorage.setItem('menulens-preferences', JSON.stringify(userPreferences));
-  };
-
-  // Load saved preferences on mount
-  useEffect(() => {
-    const saved = localStorage.getItem('menulens-preferences');
-    if (saved) {
-      setUserPreferences(JSON.parse(saved));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (showCamera && !cameraStream && !cameraError) {
-      startCamera();
-    }
-    return () => {
-      stopCamera();
-    };
-  }, [showCamera]);
-
-  useEffect(() => {
-    const video = videoRef.current;
-    if (video && cameraStream && video.srcObject !== cameraStream) {
-      video.srcObject = cameraStream;
-    }
-  }, [cameraStream, analyzing, results, cameraError]);
-
-  if (showCamera) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 p-4">
-        <div className="max-w-md mx-auto">
-          {/* Header */}
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-4">
-              <button
-                onClick={() => {
-                  stopCamera();
-                  setShowCamera(false);
-                  setResults(null);
-                  setCameraError(null);
-                  setScanError(null);
-                }}
-                className="text-gray-600 hover:text-gray-800 transition-colors"
-              >
-                ← Back
-              </button>
-              <h1 className="text-2xl font-bold text-gray-900">MenuLens</h1>
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={handleSettings}
-                className="flex items-center gap-2 bg-gray-800 text-white px-4 py-2 rounded-lg hover:bg-gray-900 transition-colors shadow-md"
-              >
-                <Settings className="w-4 h-4" />
-                Settings
-              </button>
-              <button
-                onClick={handleTravelMode}
-                className="flex items-center gap-2 bg-orange-700 text-white px-4 py-2 rounded-lg hover:bg-orange-800 transition-colors shadow-md"
-              >
-                <Globe className="w-4 h-4" />
-                Travel
-              </button>
-            </div>
+        {step === 'welcome' && (
+          <div className="bg-white rounded-2xl shadow p-6 space-y-4">
+            <h2 className="text-xl font-semibold text-gray-900">{t(language, 'welcomeTitle')}</h2>
+            <p className="text-gray-700">{t(language, 'welcomeBody')}</p>
+            <Disclaimer language={language} />
+            <InstallPanel language={language} />
+            <button type="button" onClick={() => setStep('diets')} className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold">
+              {t(language, 'continue')}
+            </button>
           </div>
+        )}
 
-          {/* Camera Interface */}
-          <div className="bg-white rounded-2xl shadow-lg p-6 mb-6">
-            <div className="aspect-square bg-gray-100 rounded-xl mb-4 flex items-center justify-center overflow-hidden">
-              {analyzing ? (
-                <div className="text-center">
-                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-                  <p className="text-gray-800">Analyzing menu...</p>
-                </div>
-              ) : results ? (
-                <div className="text-center text-green-600">
-                  <CheckCircle className="w-16 h-16 mx-auto mb-2" />
-                  <p className="font-semibold">Analysis Complete!</p>
-                </div>
-              ) : cameraError ? (
-                <div className="text-center text-red-600 p-4">
-                  <X className="w-16 h-16 mx-auto mb-2" />
-                  <p className="text-sm">{cameraError}</p>
+        {step === 'diets' && (
+          <div className="bg-white rounded-2xl shadow p-6 space-y-4">
+            <h2 className="text-xl font-semibold text-gray-900">{t(language, 'dietTitle')}</h2>
+            <p className="text-sm text-gray-700">{t(language, 'dietHint')}</p>
+            <div className="flex flex-wrap gap-2">
+              {DIET_CHIPS.map((chip) => {
+                const on = profile.diets.includes(chip.id);
+                return (
                   <button
-                    onClick={startCamera}
-                    className="mt-4 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors"
+                    key={chip.id}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => toggleDiet(chip.id)}
+                    className={`px-3 py-2 rounded-full border text-sm ${on ? 'bg-blue-800 text-white border-blue-800' : 'bg-gray-50 text-gray-900 border-gray-300'}`}
                   >
-                    Try Again
+                    {t(language, `chip.${chip.id}`)}
                   </button>
-                </div>
-              ) : (
-                <div className="w-full h-full relative">
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full h-full object-cover"
-                  />
-                  {!cameraStream && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-gray-100">
-                      <div className="text-center text-gray-400">
-                        <Camera className="w-16 h-16 mx-auto mb-2" />
-                        <p className="text-gray-700">Initializing camera...</p>
-                      </div>
-                    </div>
+                );
+              })}
+            </div>
+            {profile.diets.includes('other') && (
+              <input
+                value={profile.other}
+                onChange={(event) => setProfile((current) => ({ ...current, other: event.target.value }))}
+                placeholder={t(language, 'otherPlaceholder')}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2"
+              />
+            )}
+            <Disclaimer language={language} />
+            <button type="button" onClick={() => setStep('email')} className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold">
+              {t(language, 'continue')}
+            </button>
+          </div>
+        )}
+
+        {step === 'email' && (
+          <div className="bg-white rounded-2xl shadow p-6 space-y-4">
+            <h2 className="text-xl font-semibold text-gray-900">{t(language, 'emailTitle')}</h2>
+            <p className="text-sm text-gray-700">{t(language, 'emailBody')}</p>
+            <input
+              type="email"
+              value={profile.email}
+              onChange={(event) => setProfile((current) => ({ ...current, email: event.target.value }))}
+              placeholder={t(language, 'emailPlaceholder')}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2"
+            />
+            <label className="flex gap-2 text-sm text-gray-800">
+              <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
+              <span>{t(language, 'consent')}</span>
+            </label>
+            {emailNote && <p className="text-sm text-gray-700">{emailNote}</p>}
+            <button type="button" onClick={saveEmail} className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold">
+              {t(language, 'save')}
+            </button>
+            <button type="button" onClick={() => setStep('scan')} className="w-full bg-gray-200 text-gray-900 py-3 rounded-xl font-semibold">
+              {t(language, 'skip')}
+            </button>
+          </div>
+        )}
+
+        {step === 'scan' && (
+          <>
+            <div className="flex items-center justify-between">
+              <button type="button" onClick={() => setStep('diets')} className="text-gray-700">
+                ← {t(language, 'back')}
+              </button>
+            </div>
+            <Disclaimer language={language} />
+            {emailNote && <p className="text-sm text-gray-800 bg-white rounded-xl p-4 shadow">{emailNote}</p>}
+            <div className="bg-white rounded-xl p-4 shadow text-sm text-gray-800 space-y-2">
+              <p>{t(language, 'trial')}</p>
+              {access.mode === 'expired' && <p className="text-red-700">{t(language, 'trialEnded')}</p>}
+              <div className="flex gap-2">
+                <button type="button" onClick={subscribe} className="bg-blue-800 text-white px-3 py-2 rounded-lg">
+                  {t(language, 'subscribe')}
+                </button>
+                <button type="button" onClick={manage} className="bg-gray-200 text-gray-900 px-3 py-2 rounded-lg">
+                  {t(language, 'manage')}
+                </button>
+              </div>
+              {billingNote && <p>{billingNote}</p>}
+            </div>
+            <OfferList diets={profile.diets} language={language} />
+            {phase !== 'done' && <div className="bg-white rounded-2xl shadow p-4 space-y-3">
+              <div className="aspect-square bg-gray-100 rounded-xl overflow-hidden relative">
+                <video ref={videoRef} autoPlay playsInline muted className={`w-full h-full object-cover ${phase === 'idle' && !showCameraError ? '' : 'hidden'}`} />
+                {(phase === 'preparing' || phase === 'reading') && (
+                  <div className="absolute inset-0 bg-white p-4">
+                    <p className="text-sm text-gray-800 mb-3">{phase === 'preparing' ? t(language, 'preparing') : t(language, 'reading')}</p>
+                    {(phase === 'preparing' || !results || (results.safeItems.length === 0 && results.riskyItems.length === 0)) && <SkeletonRows />}
+                  </div>
+                )}
+                {showCameraError && phase === 'idle' && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
+                    <X className="w-10 h-10 text-red-600 mb-2" />
+                    <p className="text-sm text-red-700">{t(language, 'cameraDenied')}</p>
+                  </div>
+                )}
+                {!cameraStream && !showCameraError && phase === 'idle' && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-600">
+                    <Camera className="w-10 h-10 mb-2" />
+                    <p className="text-sm">{t(language, 'startCamera')}</p>
+                  </div>
+                )}
+              </div>
+              {scanError && <p className="text-sm text-red-700 bg-red-50 rounded-lg p-3">{scanError}</p>}
+              {phase === 'idle' && access.allowed !== false && (
+                <div className="space-y-2">
+                  {cameraStream && (
+                    <button type="button" onClick={capturePhoto} className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold">
+                      {t(language, 'capture')}
+                    </button>
                   )}
+                  <button type="button" onClick={() => fileRef.current?.click()} className="w-full bg-gray-200 text-gray-900 py-3 rounded-xl font-semibold">
+                    {t(language, 'choosePhoto')}
+                  </button>
+                  <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onFile} />
                 </div>
               )}
-            </div>
-
-            {scanError && !analyzing && (
-              <p className="mb-3 text-sm text-red-700 bg-red-50 rounded-lg p-3">{scanError}</p>
-            )}
-
-            {!results && !analyzing && !cameraError && (
+            </div>}
+            {results && (results.safeItems.length > 0 || results.riskyItems.length > 0 || phase === 'done') && (
               <div className="space-y-3">
-                {!cameraStream ? (
+                {results.partial && <p className="text-sm text-gray-700">{t(language, 'stillReading')}</p>}
+                {Number.isFinite(results.durationMs) && (
+                  <p className="text-sm text-gray-700">{t(language, 'readIn')} {(results.durationMs / 1000).toFixed(1)}s</p>
+                )}
+                <p className="text-sm text-gray-700">{t(language, 'estimate')}</p>
+                <ResultList title={t(language, 'safe')} items={results.safeItems} empty={t(language, 'noSafe')} tone="safe" />
+                <ResultList title={t(language, 'risky')} items={results.riskyItems} empty={t(language, 'noRisky')} tone="risky" />
+                <div className="bg-white rounded-xl p-4 shadow">
+                  <h3 className="font-semibold text-orange-700 mb-2">{t(language, 'allergens')}</h3>
+                  {results.allergens.length === 0 && <p className="text-sm text-gray-600">{t(language, 'noAllergens')}</p>}
+                  <div className="flex flex-wrap gap-2">
+                    {results.allergens.map((allergen) => (
+                      <span key={allergen} className="bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">{allergen}</span>
+                    ))}
+                  </div>
+                </div>
+                <Disclaimer language={language} />
+                {phase === 'done' && (
                   <button
-                    onClick={startCamera}
-                    className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
+                    type="button"
+                    onClick={() => {
+                      setResults(null);
+                      setScanError('');
+                      setPhase('idle');
+                    }}
+                    className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold flex items-center justify-center gap-2"
                   >
-                    Start Camera
-                  </button>
-                ) : (
-                  <button
-                    onClick={capturePhoto}
-                    className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
-                  >
-                    Capture & Scan Menu
+                    <CheckCircle className="w-4 h-4" />
+                    {t(language, 'scanAnother')}
                   </button>
                 )}
               </div>
             )}
-          </div>
-
-          {/* Results */}
-          {results && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4"
-            >
-              <p className="text-sm text-gray-700">
-                Tags marked estimate are model guesses. A diet counts as confirmed only when the menu states it.
-              </p>
-              {/* Safe Items */}
-              <div className="bg-white rounded-xl p-4 shadow-lg">
-                <h3 className="font-semibold text-green-700 mb-3 flex items-center gap-2">
-                  <CheckCircle className="w-5 h-5" />
-                  Safe Options
-                </h3>
-                <div className="space-y-2">
-                  {results.safeItems.length === 0 && (
-                    <p className="text-sm text-gray-600">No dishes matched your saved preferences.</p>
-                  )}
-                  {results.safeItems.map((item, index) => (
-                    <div key={index} className="flex items-center gap-3 p-2 bg-green-50 rounded-lg">
-                      <CheckCircle className="w-4 h-4 text-green-600" />
-                      <span className="text-sm">{item}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Risky Items */}
-              <div className="bg-white rounded-xl p-4 shadow-lg">
-                <h3 className="font-semibold text-red-700 mb-3 flex items-center gap-2">
-                  <X className="w-5 h-5" />
-                  Contains Allergens
-                </h3>
-                <div className="space-y-2">
-                  {results.riskyItems.length === 0 && (
-                    <p className="text-sm text-gray-600">No allergen conflicts in the dishes that were read.</p>
-                  )}
-                  {results.riskyItems.map((item, index) => (
-                    <div key={index} className="flex items-center gap-3 p-2 bg-red-50 rounded-lg">
-                      <X className="w-4 h-4 text-red-600" />
-                      <span className="text-sm">{item}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Allergens Detected */}
-              <div className="bg-white rounded-xl p-4 shadow-lg">
-                <h3 className="font-semibold text-orange-700 mb-3">Allergens Detected</h3>
-                <div className="flex flex-wrap gap-2">
-                  {results.allergens.length === 0 && (
-                    <p className="text-sm text-gray-600">None named on the menu text that was read.</p>
-                  )}
-                  {results.allergens.map((allergen, index) => (
-                    <span key={index} className="bg-orange-100 text-orange-800 px-3 py-1 rounded-full text-sm">
-                      {allergen}
-                    </span>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                onClick={() => {
-                  setResults(null);
-                  setScanError(null);
-                }}
-                className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
-              >
-                Scan another menu
-              </button>
-            </motion.div>
-          )}
-        </div>
-
-        {/* Settings Modal */}
-        <AnimatePresence>
-          {showSettingsModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
-              onClick={() => setShowSettingsModal(false)}
-            >
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="bg-white rounded-2xl p-6 max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="flex items-center justify-between mb-6">
-                  <h3 className="text-xl font-bold text-gray-900">Dietary Preferences</h3>
-                  <button
-                    onClick={() => setShowSettingsModal(false)}
-                    className="text-gray-400 hover:text-gray-600"
-                  >
-                    <X className="w-6 h-6" />
-                  </button>
-                </div>
-
-                {/* Dietary Restrictions */}
-                <div className="mb-6">
-                  <h4 className="font-semibold text-gray-800 mb-3">Dietary Restrictions</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    {dietaryOptions.map((option) => (
-                      <button
-                        key={option.id}
-                        onClick={() => toggleDietaryRestriction(option.id)}
-                        className={`p-3 rounded-lg border-2 text-left transition-colors ${
-                          userPreferences.dietaryRestrictions.includes(option.id)
-                            ? 'border-blue-500 bg-blue-50 text-blue-900'
-                            : 'border-gray-300 bg-gray-100 text-gray-900 hover:border-gray-400 hover:bg-gray-200'
-                        }`}
-                      >
-                        <div className="flex items-center gap-2">
-                          <span className="text-lg">{option.icon}</span>
-                          <span className="text-sm font-medium">{option.label}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Allergens */}
-                <div className="mb-6">
-                  <h4 className="font-semibold text-gray-800 mb-3">Allergen Alerts</h4>
-                  <div className="grid grid-cols-2 gap-3">
-                    {allergenOptions.map((allergen) => (
-                      <button
-                        key={allergen}
-                        onClick={() => toggleAllergen(allergen)}
-                        className={`p-3 rounded-lg border-2 text-left transition-colors ${
-                          userPreferences.allergens.includes(allergen)
-                            ? 'border-red-500 bg-red-50 text-red-900'
-                            : 'border-gray-300 bg-gray-100 text-gray-900 hover:border-gray-400 hover:bg-gray-200'
-                        }`}
-                      >
-                        <span className="text-sm font-medium">{allergen}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowSettingsModal(false)}
-                    className="flex-1 bg-gray-200 text-gray-800 py-3 rounded-xl font-semibold hover:bg-gray-300 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={saveSettings}
-                    className="flex-1 bg-blue-700 text-white py-3 rounded-xl font-semibold hover:bg-blue-800 transition-colors flex items-center justify-center gap-2"
-                  >
-                    <Save className="w-4 h-4" />
-                    Save Settings
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Travel Modal */}
-        <AnimatePresence>
-          {showTravelModal && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50"
-              onClick={() => setShowTravelModal(false)}
-            >
-              <motion.div
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                exit={{ scale: 0.9, opacity: 0 }}
-                className="bg-white rounded-2xl p-6 max-w-sm w-full mx-4"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <div className="text-center mb-6">
-                  <Globe className="w-12 h-12 text-orange-500 mx-auto mb-4" />
-                  <h3 className="text-xl font-bold text-gray-800 mb-2">Travel Mode</h3>
-                  <p className="text-gray-800">Get personalized dining recommendations for your destination</p>
-                </div>
-
-                <div className="space-y-4 mb-6">
-                  <div className="flex items-center gap-3 p-3 bg-blue-50 rounded-lg">
-                    <MapPin className="w-5 h-5 text-blue-600" />
-                    <div>
-                      <p className="font-medium text-gray-800">Local Cuisine</p>
-                      <p className="text-sm text-gray-700">Authentic recommendations</p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 p-3 bg-green-50 rounded-lg">
-                    <Clock className="w-5 h-5 text-green-600" />
-                    <div>
-                      <p className="font-medium text-gray-800">Opening Hours</p>
-                      <p className="text-sm text-gray-700">Real-time availability</p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-3 p-3 bg-purple-50 rounded-lg">
-                    <Users className="w-5 h-5 text-purple-600" />
-                    <div>
-                      <p className="font-medium text-gray-800">Group Friendly</p>
-                      <p className="text-sm text-gray-700">Perfect for families</p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowTravelModal(false)}
-                    className="flex-1 bg-gray-200 text-gray-800 py-3 rounded-xl font-semibold hover:bg-gray-300 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button className="flex-1 bg-orange-700 text-white py-3 rounded-xl font-semibold hover:bg-orange-800 transition-colors">
-                    Enable Travel Mode
-                  </button>
-                </div>
-              </motion.div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-100 to-indigo-200 flex items-center justify-center p-6">
-      <div className="max-w-sm w-full">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentStep}
-            initial={{ opacity: 0, x: 50 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -50 }}
-            transition={{ duration: 0.3 }}
-            className="bg-white rounded-2xl shadow-lg p-8 text-center"
-          >
-            <div className={`w-16 h-16 ${onboardingSteps[currentStep].color} mx-auto mb-6 flex items-center justify-center`}>
-              {React.createElement(onboardingSteps[currentStep].icon, { className: "w-8 h-8" })}
-            </div>
-
-            <h2 className="text-2xl font-bold text-gray-800 mb-4">
-              {onboardingSteps[currentStep].title}
-            </h2>
-
-            <p className="text-gray-800 mb-8">
-              {onboardingSteps[currentStep].description}
-            </p>
-
-            <div className="flex justify-center gap-2 mb-8">
-              {onboardingSteps.map((_, index) => (
-                <div
-                  key={index}
-                  className={`w-2 h-2 rounded-full transition-colors ${
-                    index === currentStep ? 'bg-blue-600' : 'bg-gray-300'
-                  }`}
-                />
-              ))}
-            </div>
-
-            <button
-              onClick={handleNext}
-              className="w-full bg-blue-800 text-white py-3 rounded-xl font-semibold hover:bg-blue-900 transition-colors shadow-lg"
-            >
-              {currentStep === onboardingSteps.length - 1 ? 'Get Started' : 'Next'}
-            </button>
-          </motion.div>
-        </AnimatePresence>
+            <InstallPanel language={language} />
+          </>
+        )}
       </div>
     </div>
   );

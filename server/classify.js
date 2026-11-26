@@ -1,3 +1,13 @@
+import {
+  alcoholPhrase,
+  containsPhrase,
+  dietLabel as translatedDietLabel,
+  estimateWord,
+  normalizeLanguage,
+  notStatedPhrase,
+  notePhrase,
+} from '../shared/phrases.js';
+
 const DIETS = [
   { id: 'vegetarian', label: 'Vegetarian' },
   { id: 'vegan', label: 'Vegan' },
@@ -46,8 +56,8 @@ const ALLERGEN_ALIASES = new Map([
   ['sesame', 'Sesame'],
 ]);
 
-function dietLabel(id) {
-  return DIET_BY_ID.get(id)?.label ?? id;
+function dietLabel(id, language = 'en') {
+  return translatedDietLabel(language, id) ?? DIET_BY_ID.get(id)?.label ?? id;
 }
 
 function canonicalAllergen(value) {
@@ -66,13 +76,16 @@ function normalizeTag(tag) {
   };
 }
 
-function tagText(tag) {
-  const label = dietLabel(tag.id);
-  return tag.basis === 'stated' ? label : `${label} (estimate)`;
+function tagText(tag, language) {
+  const label = dietLabel(tag.id, language);
+  if (normalizeLanguage(language) === 'en') {
+    return tag.basis === 'stated' ? label : `${label} (estimate)`;
+  }
+  return tag.basis === 'stated' ? label : `${label} (${estimateWord(language)})`;
 }
 
-function formatDish(dish) {
-  const tags = (dish.tags ?? []).map(tagText);
+function formatDish(dish, language = 'en') {
+  const tags = (dish.tags ?? []).map((tag) => tagText(tag, language));
   if (tags.length === 0) return dish.name;
   return `${dish.name} — ${tags.join(', ')}`;
 }
@@ -105,7 +118,13 @@ function normalizeDish(raw) {
       tags.push(normalized);
     }
   }
-  return { name: raw.name.trim(), allergens, tags };
+  return {
+    name: raw.name.trim(),
+    allergens,
+    tags,
+    alcohol: raw.alcohol === true,
+    noteConflict: raw.noteConflict === true,
+  };
 }
 
 function classifyDishes(rawDishes, preferences = {}) {
@@ -113,10 +132,12 @@ function classifyDishes(rawDishes, preferences = {}) {
     .map(normalizeDish)
     .filter(Boolean);
 
+  const language = normalizeLanguage(preferences.language);
   const wantedDiets = (preferences.dietaryRestrictions ?? []).filter((id) => DIET_BY_ID.has(id));
   const watchedAllergens = (preferences.allergens ?? [])
     .map(canonicalAllergen)
     .filter(Boolean);
+  const avoidAlcohol = preferences.avoidAlcohol === true;
 
   const safeItems = [];
   const riskyItems = [];
@@ -129,15 +150,17 @@ function classifyDishes(rawDishes, preferences = {}) {
 
     const reasons = [];
     for (const allergen of dish.allergens) {
-      if (watchedAllergens.includes(allergen)) reasons.push(`contains ${allergen}`);
+      if (watchedAllergens.includes(allergen)) reasons.push(containsPhrase(language, allergen));
     }
+    if (avoidAlcohol && dish.alcohol) reasons.push(alcoholPhrase(language));
+    if (dish.noteConflict) reasons.push(notePhrase(language));
     for (const dietId of wantedDiets) {
       if (!satisfiesDiet(dish, dietId)) {
-        reasons.push(`${dietLabel(dietId)} not stated on the menu`);
+        reasons.push(notStatedPhrase(language, dietLabel(dietId, language)));
       }
     }
 
-    const line = formatDish(dish);
+    const line = formatDish(dish, language);
     if (reasons.length > 0) {
       riskyItems.push(`${line} (${reasons.join('; ')})`);
     } else {

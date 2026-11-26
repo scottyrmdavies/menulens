@@ -10,11 +10,13 @@
     "dev": "vite",
     "scan-server": "node --env-file-if-exists=.env server/index.js",
     "build": "vite build",
-    "test": "node --test server/classify.test.js server/scan.test.js",
+    "test": "node --test server/*.test.js shared/*.test.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.1",
+    "@vercel/analytics": "^2.0.1",
     "framer-motion": "^12.27.2",
     "lucide-react": "^0.562.0",
     "react": "^19.2.0",
