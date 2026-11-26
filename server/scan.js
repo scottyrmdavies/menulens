@@ -5,12 +5,29 @@
 import { classifyDishes, parseModelJson } from './classify.js';
 import { MAX_IMAGE_BASE64_CHARS, MAX_REQUEST_BYTES } from '../shared/limits.js';
 
-const GEMINI_MODEL = 'gemini-4-hydrogen';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// Free-tier models that accept a menu photo. Hydrogen is tried first.
+// When it answers 503, 429, or "high demand", the same model is retried,
+// then the scan moves to Flash and Flash-Lite, which have separate capacity.
+const GEMINI_MODELS = Object.freeze([
+  Object.freeze({ id: 'gemini-4-hydrogen', thinkingLevel: 'MEDIUM', attemptTimeoutMs: 22_000 }),
+  Object.freeze({ id: 'gemini-3.8-flash', thinkingLevel: 'LOW', attemptTimeoutMs: 15_000 }),
+  Object.freeze({ id: 'gemini-3.5-flash-lite', thinkingLevel: 'LOW', attemptTimeoutMs: 12_000 }),
+]);
+const GEMINI_MODEL = GEMINI_MODELS[0].id;
+const GEMINI_URL = geminiUrl(GEMINI_MODEL);
+const BUSY_MESSAGE = 'The menu scanner is busy right now. Wait a moment and try again.';
+const BUSY_BACKOFF_MS = Object.freeze([300, 900]);
+const BUSY_RETRIES = 2;
+// Worst case is one timed-out attempt per model plus the short backoffs,
+// about a minute. Hobby allows 300s; this stays well under that.
+const SCAN_BUDGET_MS = 70_000;
 const VISION_URL = 'https://vision.googleapis.com/v1/images:annotate';
-const GEMINI_TIMEOUT_MS = 45_000;
 const VISION_TIMEOUT_MS = 8_000;
 const MAX_OCR_CHARS = 20_000;
+
+function geminiUrl(modelId) {
+  return `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
+}
 
 const ALLOWED_MIME = new Set([
   'image/jpeg',
@@ -20,8 +37,12 @@ const ALLOWED_MIME = new Set([
   'image/heif',
 ]);
 
-function httpError(message, status) {
-  return Object.assign(new Error(message), { status });
+function httpError(message, status, flags = {}) {
+  return Object.assign(new Error(message), { status, ...flags });
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function geminiKey(env) {
@@ -108,7 +129,7 @@ ${ocr}`;
 
 function modelText(payload) {
   if (payload?.promptFeedback?.blockReason) {
-    throw httpError('Gemini declined to read that photo. Try another picture of the menu.', 422);
+    throw httpError('Gemini declined to read that photo. Try another picture of the menu.', 422, { fatal: true });
   }
   const candidate = payload?.candidates?.[0];
   const parts = candidate?.content?.parts ?? [];
@@ -118,7 +139,7 @@ function modelText(payload) {
     .join('')
     .trim();
   if (!text) {
-    throw httpError('Gemini returned no reading of the menu.', 502);
+    throw httpError('Gemini returned no reading of the menu.', 502, { skipModel: true });
   }
   return text;
 }
@@ -130,9 +151,9 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs) {
     return await fetchImpl(url, { ...init, signal: controller.signal });
   } catch (error) {
     if (error?.name === 'AbortError') {
-      throw httpError('The menu scan took too long. Try a closer photo of one page.', 504);
+      throw httpError(BUSY_MESSAGE, 503, { busy: true, timeout: true });
     }
-    throw httpError('The menu scan could not reach Gemini. Try again.', 502);
+    throw httpError('The menu scan could not reach Gemini. Try again.', 502, { network: true });
   } finally {
     clearTimeout(timer);
   }
@@ -169,29 +190,36 @@ async function readMenuText(imageBase64, env, fetchImpl) {
   }
 }
 
-function geminiFailure(response, payload, env) {
+function isBusyResponse(response, payload) {
+  const status = response?.status;
+  const message = `${payload?.error?.message || ''} ${payload?.error?.status || ''}`.toLowerCase();
+  if (status === 429 || status === 503) return true;
+  return status >= 500 && /high demand|overload|unavailable|resource exhausted|try again/.test(message);
+}
+
+function geminiFailure(response, payload, env, modelId) {
   if (response.status === 400) {
     const detail = payload?.error?.message || '';
     if (/image|mime|inline|unsupported/i.test(detail)) {
-      return httpError('Gemini could not read that photo. Try a closer, well-lit picture of the menu.', 422);
+      return httpError('Gemini could not read that photo. Try a closer, well-lit picture of the menu.', 422, { fatal: true });
     }
-    return httpError(redact(detail, env) || 'Gemini rejected the scan request.', 502);
+    return httpError(redact(detail, env) || 'Gemini rejected the scan request.', 502, { fatal: true });
   }
   if (response.status === 401 || response.status === 403) {
-    return httpError('The Gemini API key was rejected. Check GEMINI_API_KEY.', 502);
+    return httpError('The Gemini API key was rejected. Check GEMINI_API_KEY.', 502, { fatal: true });
   }
   if (response.status === 404) {
-    return httpError(`The dish model ${GEMINI_MODEL} is not available to this API key.`, 502);
+    return httpError(`The dish model ${modelId} is not available to this API key.`, 502, { skipModel: true });
   }
-  if (response.status === 429) {
-    return httpError('The free Gemini quota is busy right now. Wait a moment and try the scan again.', 429);
+  if (isBusyResponse(response, payload)) {
+    return httpError(BUSY_MESSAGE, 503, { busy: true });
   }
   const message = payload?.error?.message || 'Gemini could not read that menu photo.';
-  return httpError(redact(message, env), 502);
+  return httpError(redact(message, env), 502, { skipModel: true });
 }
 
-async function extractDishes(image, menuText, env, fetchImpl) {
-  const response = await fetchWithTimeout(fetchImpl, GEMINI_URL, {
+async function requestDishes(model, image, menuText, env, fetchImpl, timeoutMs) {
+  const response = await fetchWithTimeout(fetchImpl, geminiUrl(model.id), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -210,22 +238,71 @@ async function extractDishes(image, menuText, env, fetchImpl) {
       generationConfig: {
         responseMimeType: 'application/json',
         maxOutputTokens: 16384,
-        thinkingConfig: { thinkingLevel: 'MEDIUM' },
+        thinkingConfig: { thinkingLevel: model.thinkingLevel },
       },
     }),
-  }, GEMINI_TIMEOUT_MS);
+  }, timeoutMs);
 
   const payload = await response.json().catch(() => null);
-  if (!response.ok) throw geminiFailure(response, payload, env);
+  if (!response.ok) throw geminiFailure(response, payload, env, model.id);
 
-  let dishes;
   try {
-    dishes = parseModelJson(modelText(payload));
+    return parseModelJson(modelText(payload));
   } catch (error) {
-    if (error.status) throw error;
-    throw httpError(error.message || 'The dish model did not return readable JSON.', 502);
+    if (error.fatal) throw error;
+    if (error.skipModel) throw error;
+    throw httpError(error.message || 'The dish model did not return readable JSON.', 502, { skipModel: true });
   }
-  return dishes;
+}
+
+async function extractDishes(image, menuText, env, fetchImpl, options = {}) {
+  const models = options.models ?? GEMINI_MODELS;
+  const backoffMs = options.backoffMs ?? BUSY_BACKOFF_MS;
+  const retries = options.retries ?? BUSY_RETRIES;
+  const sleep = options.sleep ?? defaultSleep;
+  const now = options.now ?? Date.now;
+  const budgetMs = options.budgetMs ?? SCAN_BUDGET_MS;
+  const started = now();
+  let sawBusy = false;
+  let lastError = null;
+
+  for (const model of models) {
+    const maxAttempts = 1 + retries;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const remaining = () => budgetMs - (now() - started);
+      if (remaining() < 2_000) {
+        if (sawBusy || !lastError) throw httpError(BUSY_MESSAGE, 503);
+        throw lastError;
+      }
+      if (attempt > 0) {
+        const delay = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
+        if (remaining() < delay + 2_000) break;
+        await sleep(delay);
+      }
+      const timeoutMs = Math.min(model.attemptTimeoutMs ?? 15_000, remaining() - 500);
+      if (timeoutMs < 2_000) break;
+      try {
+        return await requestDishes(model, image, menuText, env, fetchImpl, timeoutMs);
+      } catch (error) {
+        lastError = error;
+        if (error.fatal) throw error;
+        if (error.timeout) {
+          sawBusy = true;
+          break;
+        }
+        if (error.busy || error.network) {
+          if (error.busy) sawBusy = true;
+          if (attempt < maxAttempts - 1) continue;
+          break;
+        }
+        if (error.skipModel) break;
+        throw error;
+      }
+    }
+  }
+
+  if (sawBusy) throw httpError(BUSY_MESSAGE, 503);
+  throw lastError || httpError(BUSY_MESSAGE, 503);
 }
 
 async function scanMenu(body, options = {}) {
@@ -245,7 +322,7 @@ async function scanMenu(body, options = {}) {
 
   const image = assertImage(body, maxImageBase64Chars);
   const menuText = await readMenuText(image.data, env, fetchImpl);
-  const dishes = await extractDishes(image, menuText, env, fetchImpl);
+  const dishes = await extractDishes(image, menuText, env, fetchImpl, options);
   const preferences = body.preferences && typeof body.preferences === 'object' && !Array.isArray(body.preferences)
     ? body.preferences
     : {};
@@ -294,7 +371,10 @@ async function scanResponse(body, options) {
 }
 
 export {
+  BUSY_BACKOFF_MS,
+  BUSY_MESSAGE,
   GEMINI_MODEL,
+  GEMINI_MODELS,
   GEMINI_URL,
   handleRawBody,
   healthStatus,

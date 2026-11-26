@@ -1,7 +1,7 @@
 import { handleRawBody } from '../server/scan.js';
 
 export const config = {
-  maxDuration: 60,
+  maxDuration: 300,
 };
 
 export async function POST(request) {
