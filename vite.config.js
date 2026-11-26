@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+// Local dev only. On Vercel, /api is served by the functions in /api.
 // https://vite.dev/config/
 const scanPort = process.env.PORT || 8787
 

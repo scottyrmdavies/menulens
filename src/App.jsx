@@ -1,6 +1,61 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Shield, Leaf, Dumbbell, Globe, Camera, CheckCircle, X, MapPin, Clock, Users, Settings, Save } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { CLIENT_MAX_IMAGE_BASE64_CHARS } from '../shared/limits.js';
+
+function frameToCanvas(video, maxEdge) {
+  const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas;
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result ?? '');
+      const comma = value.indexOf(',');
+      resolve(comma === -1 ? value : value.slice(comma + 1));
+    };
+    reader.onerror = () => reject(new Error('Could not read the photo. Try again.'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+// Vercel Hobby drops request bodies over 4.5 MB before the scan function
+// runs. Shrink the frame until the JPEG fits, starting from a size that
+// still keeps menu type readable.
+async function compressedJpegBase64(video) {
+  let maxEdge = 2000;
+  let quality = 0.85;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const canvas = frameToCanvas(video, maxEdge);
+    if (!canvas) throw new Error('Could not read the photo. Try again.');
+    const blob = await canvasToJpeg(canvas, quality);
+    if (!blob) throw new Error('Could not read the photo. Try again.');
+    const base64 = await blobToBase64(blob);
+    if (base64.length <= CLIENT_MAX_IMAGE_BASE64_CHARS) return base64;
+    if (quality > 0.55) {
+      quality = Math.round((quality - 0.1) * 100) / 100;
+    } else if (maxEdge > 800) {
+      maxEdge = Math.round(maxEdge * 0.75);
+    } else {
+      break;
+    }
+  }
+  throw new Error('That photo is too large to scan. Move closer and try again.');
+}
 
 function App() {
   const [currentStep, setCurrentStep] = useState(0);
@@ -71,30 +126,13 @@ function App() {
       return;
     }
 
-    const maxEdge = 2000;
-    const scale = Math.min(1, maxEdge / Math.max(video.videoWidth, video.videoHeight));
-    const canvas = document.createElement('canvas');
-    canvas.width = Math.round(video.videoWidth * scale);
-    canvas.height = Math.round(video.videoHeight * scale);
-    const context = canvas.getContext('2d');
-    if (!context) {
-      setScanError('Could not read the photo. Try again.');
+    let imageBase64;
+    try {
+      imageBase64 = await compressedJpegBase64(video);
+    } catch (error) {
+      setScanError(error.message || 'Could not read the photo. Try again.');
       return;
     }
-    context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-    if (!blob) {
-      setScanError('Could not read the photo. Try again.');
-      return;
-    }
-    const dataUrl = await new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result);
-      reader.onerror = () => reject(new Error('Could not read the photo.'));
-      reader.readAsDataURL(blob);
-    });
-    const imageBase64 = String(dataUrl).split(',')[1];
 
     setScanError(null);
     setResults(null);
@@ -111,7 +149,12 @@ function App() {
       });
       const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        setScanError(payload?.error || 'Menu scan failed. Try another photo.');
+        const message = typeof payload?.error === 'string' ? payload.error : '';
+        if (response.status === 413) {
+          setScanError(message || 'That photo is too large to scan. Move closer and try again.');
+          return;
+        }
+        setScanError(message || 'Menu scan failed. Try another photo.');
         return;
       }
       setResults({
@@ -120,7 +163,7 @@ function App() {
         allergens: Array.isArray(payload?.allergens) ? payload.allergens : [],
       });
     } catch {
-      setScanError('Could not reach the scan server. Start it with npm run scan-server and try again.');
+      setScanError('Could not reach the menu scanner. Check your connection and try again.');
     } finally {
       setAnalyzing(false);
     }
@@ -197,6 +240,13 @@ function App() {
       stopCamera();
     };
   }, [showCamera]);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && cameraStream && video.srcObject !== cameraStream) {
+      video.srcObject = cameraStream;
+    }
+  }, [cameraStream, analyzing, results, cameraError]);
 
   if (showCamera) {
     return (

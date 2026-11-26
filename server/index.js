@@ -1,23 +1,37 @@
-// Menu scan server. Keys are read here only and never sent to the Vite client.
-// GOOGLE_CLOUD_VISION_API_KEY — Cloud Vision Document Text Detection
-// GEMINI_API_KEY — Gemini model gemini-4-hydrogen
-// PORT — optional, default 8787
+// Local scan server. Production uses the Vercel functions in /api.
+// Keys are read here only and never sent to the Vite client.
+// GEMINI_API_KEY — required. Free key from Google AI Studio.
+// GOOGLE_CLOUD_VISION_API_KEY — optional OCR hint.
+// PORT — optional, default 8787.
 import http from 'node:http';
-import { classifyDishes, parseModelJson } from './classify.js';
+import path from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+import { handleRawBody, healthStatus } from './scan.js';
+import { MAX_REQUEST_BYTES } from '../shared/limits.js';
 
-const PORT = Number(process.env.PORT) || 8787;
-const MAX_BODY_BYTES = 12 * 1024 * 1024;
-const VISION_URL = 'https://vision.googleapis.com/v1/images:annotate';
-const GEMINI_MODEL = 'gemini-4-hydrogen';
-
-function missingKeyNames() {
-  const missing = [];
-  if (!process.env.GOOGLE_CLOUD_VISION_API_KEY) missing.push('GOOGLE_CLOUD_VISION_API_KEY');
-  if (!process.env.GEMINI_API_KEY) missing.push('GEMINI_API_KEY');
-  return missing;
+function loadEnvFile(file = '.env') {
+  if (!existsSync(file)) return;
+  const text = readFileSync(file, 'utf8');
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"'))
+      || (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
 }
 
 function sendJson(response, status, body) {
+  if (response.writableEnded) return;
   const payload = JSON.stringify(body);
   response.writeHead(status, {
     'Content-Type': 'application/json',
@@ -26,142 +40,76 @@ function sendJson(response, status, body) {
   response.end(payload);
 }
 
-function readBody(request) {
+function readBody(request, maxBytes) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    let failed = false;
     request.on('data', (chunk) => {
+      if (failed) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
-        reject(Object.assign(new Error('That photo is too large to scan.'), { status: 413 }));
-        request.destroy();
+      if (size > maxBytes) {
+        failed = true;
+        reject(Object.assign(
+          new Error('That photo is too large to scan. Try a closer photo of the menu.'),
+          { status: 413 },
+        ));
         return;
       }
       chunks.push(chunk);
     });
-    request.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    request.on('error', reject);
-  });
-}
-
-async function detectDocumentText(imageBase64) {
-  const url = new URL(VISION_URL);
-  url.searchParams.set('key', process.env.GOOGLE_CLOUD_VISION_API_KEY);
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      requests: [
-        {
-          image: { content: imageBase64 },
-          features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-        },
-      ],
-    }),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = payload?.error?.message || 'Google Cloud Vision rejected the photo.';
-    throw Object.assign(new Error(message), { status: 502 });
-  }
-  const annotation = payload?.responses?.[0];
-  if (annotation?.error) {
-    throw Object.assign(new Error(annotation.error.message || 'Google Cloud Vision could not read that photo.'), { status: 502 });
-  }
-  const text = annotation?.fullTextAnnotation?.text?.trim() ?? '';
-  if (!text) {
-    throw Object.assign(new Error('No menu text was detected. Try a closer, well-lit photo of the menu.'), { status: 422 });
-  }
-  return text;
-}
-
-function extractionPrompt(menuText) {
-  return `Extract dishes from this restaurant menu text. Return JSON only, with this shape:
-{"dishes":[{"name":"string","allergens":["Peanuts"|"Tree Nuts"|"Milk"|"Eggs"|"Fish"|"Shellfish"|"Wheat"|"Soy"|"Sesame"],"tags":[{"id":"vegetarian"|"vegan"|"gluten-free"|"dairy-free"|"nut-free"|"low-carb"|"keto"|"halal"|"kosher","basis":"stated"|"estimate"}]}]}
-
-Rules:
-- One object per dish or drink a guest could order. Use the printed name. Do not invent dishes.
-- Allergens only when the menu names an ingredient or allergen that supports them. Wheat includes gluten grains. Milk includes dairy. Tree Nuts includes named tree nuts.
-- basis "stated" only when the menu itself uses that diet (vegan, vegetarian, gluten-free, GF, dairy-free, nut-free, keto, low-carb, halal, kosher, or the same words). Any diet you infer from ingredients or the dish name must use basis "estimate".
-- Omit a tag when you cannot support it. Omit allergens you cannot support.
-- If this is not a menu, return {"dishes":[]}.
-
-Menu text:
-${menuText}`;
-}
-
-async function extractDishes(menuText) {
-  const url = new URL(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`);
-  url.searchParams.set('key', process.env.GEMINI_API_KEY);
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: extractionPrompt(menuText) }] }],
-      generationConfig: {
-        temperature: 0.2,
-        responseMimeType: 'application/json',
-      },
-    }),
-  });
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    const message = payload?.error?.message || 'Gemini could not extract dishes from the menu text.';
-    throw Object.assign(new Error(message), { status: 502 });
-  }
-  const text = payload?.candidates?.[0]?.content?.parts?.map((part) => part.text ?? '').join('') ?? '';
-  return parseModelJson(text);
-}
-
-async function scanMenu({ imageBase64, preferences }) {
-  const missing = missingKeyNames();
-  if (missing.length > 0) {
-    throw Object.assign(
-      new Error(`Menu scanning is not configured. Add ${missing.join(' and ')} to the server environment. No dishes were returned.`),
-      { status: 503 },
-    );
-  }
-  if (typeof imageBase64 !== 'string' || imageBase64.length < 32) {
-    throw Object.assign(new Error('The scan request did not include a photo.'), { status: 400 });
-  }
-  const menuText = await detectDocumentText(imageBase64);
-  const dishes = await extractDishes(menuText);
-  return classifyDishes(dishes, preferences);
-}
-
-const server = http.createServer(async (request, response) => {
-  const path = new URL(request.url ?? '/', 'http://127.0.0.1').pathname;
-  if (request.method === 'GET' && path === '/api/health') {
-    sendJson(response, 200, { ok: missingKeyNames().length === 0 });
-    return;
-  }
-  if (request.method !== 'POST' || path !== '/api/scan') {
-    sendJson(response, 404, { error: 'Not found.' });
-    return;
-  }
-  try {
-    const raw = await readBody(request);
-    const body = JSON.parse(raw);
-    const result = await scanMenu(body);
-    sendJson(response, 200, {
-      safeItems: result.safeItems,
-      riskyItems: result.riskyItems,
-      allergens: result.allergens,
+    request.on('end', () => {
+      if (!failed) resolve(Buffer.concat(chunks).toString('utf8'));
     });
-  } catch (error) {
-    const status = error.status || (error instanceof SyntaxError ? 400 : 500);
-    const message = error instanceof SyntaxError
-      ? 'The scan request was not valid JSON.'
-      : (error.message || 'Menu scan failed.');
-    sendJson(response, status, { error: message });
-  }
-});
+    request.on('error', (error) => {
+      if (!failed) reject(error);
+    });
+  });
+}
 
-server.listen(PORT, '127.0.0.1', () => {
-  const missing = missingKeyNames();
-  if (missing.length > 0) {
-    console.log(`Scan server on http://127.0.0.1:${PORT} (missing ${missing.join(', ')})`);
-  } else {
-    console.log(`Scan server on http://127.0.0.1:${PORT}`);
-  }
-});
+function createScanServer(options = {}) {
+  const env = options.env ?? process.env;
+  const fetchImpl = options.fetch;
+  const maxRequestBytes = options.maxRequestBytes ?? MAX_REQUEST_BYTES;
+
+  return http.createServer(async (request, response) => {
+    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+    try {
+      if (request.method === 'GET' && url.pathname === '/api/health') {
+        sendJson(response, 200, healthStatus(env));
+        return;
+      }
+      if (request.method !== 'POST' || url.pathname !== '/api/scan') {
+        sendJson(response, 404, { error: 'Not found.' });
+        return;
+      }
+      const raw = await readBody(request, maxRequestBytes);
+      const result = await handleRawBody(raw, { env, fetch: fetchImpl, maxRequestBytes });
+      sendJson(response, result.status, result.body);
+    } catch (error) {
+      const status = error.status || 500;
+      sendJson(response, status, { error: error.message || 'Menu scan failed.' });
+    }
+  });
+}
+
+function invokedDirectly() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  return import.meta.url === pathToFileURL(path.resolve(entry)).href;
+}
+
+if (invokedDirectly()) {
+  loadEnvFile();
+  const port = Number(process.env.PORT) || 8787;
+  const server = createScanServer();
+  server.listen(port, '127.0.0.1', () => {
+    if (process.env.GEMINI_API_KEY) {
+      console.log(`Scan server on http://127.0.0.1:${port}`);
+    } else {
+      console.log(`Scan server on http://127.0.0.1:${port} (missing GEMINI_API_KEY)`);
+    }
+  });
+}
+
+export { createScanServer };
